@@ -289,6 +289,9 @@ _MODEL_DISCOVERY_ALT_ENDPOINTS = {
     ],
     "groq": ["https://api.groq.com/openai/v1/models"],
     "gemini": ["https://generativelanguage.googleapis.com/v1beta/openai/models"],
+    # Anthropic paginates /v1/models (default 20); ask for the full list so new
+    # releases (e.g. newer Opus/Sonnet) surface without a catalog edit.
+    "anthropic": ["https://api.anthropic.com/v1/models?limit=1000"],
 }
 _MODEL_DISCOVERY_HEADERS = {
     "openai": {
@@ -306,6 +309,10 @@ _MODEL_DISCOVERY_HEADERS = {
     },
     "gemini": {
         "Authorization": "Bearer {token}",
+    },
+    "anthropic": {
+        "x-api-key": "{token}",
+        "anthropic-version": "2023-06-01",
     },
 }
 _MODEL_PROVIDER_DISPLAY_NAMES = {
@@ -390,6 +397,10 @@ _AGENT_MODEL_CATALOG = [
 
 def _normalize_model_id(value: object) -> str:
     normalized = str(value or "").strip()
+    # Gemini's OpenAI-compatible /models endpoint returns ids like
+    # "models/gemini-2.5-flash"; the chat endpoint wants the bare id.
+    if normalized.startswith("models/"):
+        normalized = normalized[len("models/"):]
     return normalized
 
 
@@ -452,6 +463,42 @@ def _looks_like_zai_discovery_model(model: str) -> bool:
     return lowered.startswith("glm-")
 
 
+def _looks_like_anthropic_discovery_model(model: str) -> bool:
+    lowered = model.lower().strip()
+    return lowered.startswith("claude-") or "claude" in lowered
+
+
+def _looks_like_groq_discovery_model(model: str) -> bool:
+    raw = str(model or "").strip()
+    if not raw:
+        return False
+    # Groq's /models payload carries both a callable id (lowercase slug, e.g.
+    # "llama-3.3-70b-versatile") and a human display name ("Llama 3.3 70B").
+    # Only the id is callable, so reject anything with spaces or uppercase.
+    if any(ch.isspace() or ch.isupper() for ch in raw):
+        return False
+    # Exclude non-chat models (speech-to-text, text-to-speech, moderation).
+    if any(tag in raw for tag in ("whisper", "tts", "guard", "orpheus", "safety")):
+        return False
+    return True
+
+
+def _looks_like_gemini_discovery_model(model: str) -> bool:
+    lowered = model.lower().strip()  # "models/" prefix already stripped upstream
+    if not lowered.startswith("gemini-"):
+        return False
+    # Gemini's compat /models also lists non-text modalities; keep chat models.
+    if any(
+        tag in lowered
+        for tag in (
+            "embedding", "image", "tts", "aqa", "computer-use",
+            "native-audio", "live", "robotics",
+        )
+    ):
+        return False
+    return True
+
+
 def _discovery_model_should_belong(provider: str, model_id: str) -> bool:
     if not model_id:
         return False
@@ -463,6 +510,12 @@ def _discovery_model_should_belong(provider: str, model_id: str) -> bool:
         return _looks_like_lmstudio_discovery_model(model_id)
     if provider == "zai":
         return _looks_like_zai_discovery_model(model_id)
+    if provider == "anthropic":
+        return _looks_like_anthropic_discovery_model(model_id)
+    if provider == "groq":
+        return _looks_like_groq_discovery_model(model_id)
+    if provider == "gemini":
+        return _looks_like_gemini_discovery_model(model_id)
     return False
 
 
