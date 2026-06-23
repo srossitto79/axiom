@@ -20,7 +20,7 @@ log = logging.getLogger("forven.auth.store")
 
 LOCK_PATH = AUTH_FILE.with_suffix(".lock")
 REFRESH_BUFFER_MS = 5 * 60 * 1000  # 5 minutes before expiry
-_SUPPORTED_AUTH_PROVIDERS = {"openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek"}
+_SUPPORTED_AUTH_PROVIDERS = {"openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek", "groq", "gemini"}
 _AUTH_SECRET_FIELDS = {"access", "refresh", "token", "id_token", "api_key", "api_secret"}
 
 # Runtime-only marker attached to a profile whose ciphertext could not be
@@ -42,12 +42,16 @@ _ENV_ACCESS_TOKEN_KEYS = {
     "openrouter": ("OPENROUTER_API_KEY",),
     "anthropic": ("ANTHROPIC_API_KEY",),
     "deepseek": ("DEEPSEEK_API_KEY",),
+    "groq": ("GROQ_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
 }
 _ENV_BASE_URL_KEYS = {
     "lmstudio": ("LMSTUDIO_BASE_URL",),
     "zai": ("ZAI_BASE_URL", "ANTHROPIC_BASE_URL"),
     "anthropic": ("ANTHROPIC_BASE_URL",),
     "deepseek": ("DEEPSEEK_BASE_URL",),
+    "groq": ("GROQ_BASE_URL",),
+    "gemini": ("GEMINI_BASE_URL",),
 }
 
 

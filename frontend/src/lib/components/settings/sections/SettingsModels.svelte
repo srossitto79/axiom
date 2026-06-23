@@ -25,7 +25,7 @@
 	// Backup AI provider (wired setting). When an agent's primary provider's
 	// credentials become unusable, the call falls back to this provider instead of
 	// failing; 'none' disables fallback (the routine is then paused + an alert raised).
-	const BACKUP_PROVIDER_CHOICES = ['openai', 'minimax', 'zai', 'lmstudio'];
+	const BACKUP_PROVIDER_CHOICES = ['openai', 'minimax', 'zai', 'lmstudio', 'groq', 'gemini'];
 	// Seed from the parent prop for first paint; load() then refreshes it from the
 	// LIVE settings so a revisit reflects the persisted choice (the parent's prop is
 	// loaded once and our save doesn't update it).

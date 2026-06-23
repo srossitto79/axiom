@@ -13,7 +13,9 @@ export type ForvenProvider =
 	| 'zai'
 	| 'openrouter'
 	| 'anthropic'
-	| 'deepseek';
+	| 'deepseek'
+	| 'groq'
+	| 'gemini';
 
 // ============== Forven Classic Compatibility ==============
 

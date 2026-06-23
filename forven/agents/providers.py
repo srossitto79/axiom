@@ -950,6 +950,56 @@ class DeepSeekProvider(OpenAIProvider):
 
 
 # ---------------------------------------------------------------------------
+# Groq + Gemini (free-tier) — OpenAI-compatible
+# ---------------------------------------------------------------------------
+
+class GroqProvider(OpenAIProvider):
+    """Groq Chat API — OpenAI Chat Completions compatible.
+
+    Default base: ``https://api.groq.com/openai/v1``. Free tier with low
+    rate limits; tool-calling is supported on the larger models (e.g.
+    ``llama-3.3-70b-versatile``).
+    """
+
+    DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
+
+    @staticmethod
+    def _get_base_url() -> str:
+        profile = get_profile("groq") or {}
+        base_url = str(profile.get("base_url") or "").strip()
+        if not base_url:
+            base_url = GroqProvider.DEFAULT_BASE_URL
+        return base_url.rstrip("/")
+
+    @property
+    def ENDPOINT(self) -> str:  # type: ignore[override]
+        return f"{self._get_base_url()}/chat/completions"
+
+
+class GeminiProvider(OpenAIProvider):
+    """Google Gemini — via its OpenAI Chat Completions compatible endpoint.
+
+    Default base: ``https://generativelanguage.googleapis.com/v1beta/openai``.
+    Free tier with daily/per-minute limits; tool-calling is supported on the
+    Gemini 2.x models.
+    """
+
+    DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+    @staticmethod
+    def _get_base_url() -> str:
+        profile = get_profile("gemini") or {}
+        base_url = str(profile.get("base_url") or "").strip()
+        if not base_url:
+            base_url = GeminiProvider.DEFAULT_BASE_URL
+        return base_url.rstrip("/")
+
+    @property
+    def ENDPOINT(self) -> str:  # type: ignore[override]
+        return f"{self._get_base_url()}/chat/completions"
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -967,5 +1017,9 @@ def get_provider(name: str) -> ToolCallProvider:
         return AnthropicProvider()
     if name == "deepseek":
         return DeepSeekProvider()
+    if name == "groq":
+        return GroqProvider()
+    if name == "gemini":
+        return GeminiProvider()
     # Default to OpenAI for all other providers (openai, codex, etc.)
     return OpenAIProvider()

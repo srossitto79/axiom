@@ -252,7 +252,7 @@ def _parse_int_query(value: str | None, default: int = 0) -> int:
         return default
 
 
-_SUPPORTED_AUTH_PROVIDERS: list[str] = ["openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek"]
+_SUPPORTED_AUTH_PROVIDERS: list[str] = ["openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek", "groq", "gemini"]
 _AUTH_PROVIDER_ENV_VARS = {
     "openai": "OPENAI_API_KEY",
     "minimax": "MINIMAX_API_KEY",
@@ -261,6 +261,8 @@ _AUTH_PROVIDER_ENV_VARS = {
     "openrouter": "OPENROUTER_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "gemini": "GEMINI_API_KEY",
 }
 _AUTH_OAUTH_SESSIONS: dict[str, dict[str, dict[str, object]]] = {}
 _AUTH_OAUTH_CALLBACKS: dict[str, dict[str, str]] = {}
@@ -285,6 +287,16 @@ _MODEL_DISCOVERY_ALT_ENDPOINTS = {
         "https://api.z.ai/api/paas/v4/models",
         "https://open.bigmodel.cn/api/paas/v4/models",
     ],
+    "groq": ["https://api.groq.com/openai/v1/models"],
+    "gemini": ["https://generativelanguage.googleapis.com/v1beta/openai/models"],
+    # Anthropic paginates /v1/models (default 20); ask for the full list so new
+    # releases (e.g. newer Opus/Sonnet) surface without a catalog edit.
+    "anthropic": ["https://api.anthropic.com/v1/models?limit=1000"],
+    # DeepSeek is OpenAI-compatible; try the /v1 path first, then the bare path.
+    "deepseek": [
+        "https://api.deepseek.com/v1/models",
+        "https://api.deepseek.com/models",
+    ],
 }
 _MODEL_DISCOVERY_HEADERS = {
     "openai": {
@@ -297,6 +309,30 @@ _MODEL_DISCOVERY_HEADERS = {
     "zai": {
         "Authorization": "Bearer {token}",
     },
+    "groq": {
+        "Authorization": "Bearer {token}",
+    },
+    "gemini": {
+        "Authorization": "Bearer {token}",
+    },
+    "anthropic": {
+        "x-api-key": "{token}",
+        "anthropic-version": "2023-06-01",
+    },
+    "deepseek": {
+        "Authorization": "Bearer {token}",
+    },
+}
+
+# Endpoints used by the connection "Test" to verify a key is actually valid
+# (not just present). Defaults to the model-discovery endpoints/headers above;
+# overrides here cover providers whose /models route is unauthenticated and so
+# can't distinguish a good key from a bad one (e.g. OpenRouter).
+_AUTH_TEST_ENDPOINT_OVERRIDES = {
+    "openrouter": ["https://openrouter.ai/api/v1/key"],
+}
+_AUTH_TEST_HEADER_OVERRIDES = {
+    "openrouter": {"Authorization": "Bearer {token}"},
 }
 _MODEL_PROVIDER_DISPLAY_NAMES = {
     "openai": "OpenAI",
@@ -306,6 +342,8 @@ _MODEL_PROVIDER_DISPLAY_NAMES = {
     "openrouter": "OpenRouter",
     "anthropic": "Anthropic",
     "deepseek": "DeepSeek",
+    "groq": "Groq",
+    "gemini": "Google Gemini",
 }
 _LOCAL_PROVIDER_DEFAULT_BASE_URLS = {
     "lmstudio": "http://127.0.0.1:1234",
@@ -362,11 +400,26 @@ _AGENT_MODEL_CATALOG = [
     {"provider": "anthropic", "model_id": "claude-3-5-haiku-20241022", "label": "Anthropic Claude 3.5 Haiku"},
     {"provider": "deepseek", "model_id": "deepseek-chat", "label": "DeepSeek Chat"},
     {"provider": "deepseek", "model_id": "deepseek-reasoner", "label": "DeepSeek Reasoner"},
+    {"provider": "groq", "model_id": "llama-3.3-70b-versatile", "label": "Groq Llama 3.3 70B Versatile"},
+    {"provider": "groq", "model_id": "llama-3.1-8b-instant", "label": "Groq Llama 3.1 8B Instant"},
+    {"provider": "groq", "model_id": "openai/gpt-oss-120b", "label": "Groq GPT-OSS 120B"},
+    {"provider": "groq", "model_id": "openai/gpt-oss-20b", "label": "Groq GPT-OSS 20B"},
+    {"provider": "groq", "model_id": "moonshotai/kimi-k2-instruct", "label": "Groq Kimi K2 Instruct"},
+    {"provider": "groq", "model_id": "qwen/qwen3-32b", "label": "Groq Qwen3 32B"},
+    {"provider": "gemini", "model_id": "gemini-2.5-pro", "label": "Google Gemini 2.5 Pro"},
+    {"provider": "gemini", "model_id": "gemini-2.5-flash", "label": "Google Gemini 2.5 Flash"},
+    {"provider": "gemini", "model_id": "gemini-2.5-flash-lite", "label": "Google Gemini 2.5 Flash Lite"},
+    {"provider": "gemini", "model_id": "gemini-2.0-flash", "label": "Google Gemini 2.0 Flash"},
+    {"provider": "gemini", "model_id": "gemini-1.5-flash", "label": "Google Gemini 1.5 Flash"},
 ]
 
 
 def _normalize_model_id(value: object) -> str:
     normalized = str(value or "").strip()
+    # Gemini's OpenAI-compatible /models endpoint returns ids like
+    # "models/gemini-2.5-flash"; the chat endpoint wants the bare id.
+    if normalized.startswith("models/"):
+        normalized = normalized[len("models/"):]
     return normalized
 
 
@@ -429,6 +482,47 @@ def _looks_like_zai_discovery_model(model: str) -> bool:
     return lowered.startswith("glm-")
 
 
+def _looks_like_anthropic_discovery_model(model: str) -> bool:
+    lowered = model.lower().strip()
+    return lowered.startswith("claude-") or "claude" in lowered
+
+
+def _looks_like_deepseek_discovery_model(model: str) -> bool:
+    lowered = model.lower().strip()
+    return lowered.startswith("deepseek")
+
+
+def _looks_like_groq_discovery_model(model: str) -> bool:
+    raw = str(model or "").strip()
+    if not raw:
+        return False
+    # Groq's /models payload carries both a callable id (lowercase slug, e.g.
+    # "llama-3.3-70b-versatile") and a human display name ("Llama 3.3 70B").
+    # Only the id is callable, so reject anything with spaces or uppercase.
+    if any(ch.isspace() or ch.isupper() for ch in raw):
+        return False
+    # Exclude non-chat models (speech-to-text, text-to-speech, moderation).
+    if any(tag in raw for tag in ("whisper", "tts", "guard", "orpheus", "safety")):
+        return False
+    return True
+
+
+def _looks_like_gemini_discovery_model(model: str) -> bool:
+    lowered = model.lower().strip()  # "models/" prefix already stripped upstream
+    if not lowered.startswith("gemini-"):
+        return False
+    # Gemini's compat /models also lists non-text modalities; keep chat models.
+    if any(
+        tag in lowered
+        for tag in (
+            "embedding", "image", "tts", "aqa", "computer-use",
+            "native-audio", "live", "robotics",
+        )
+    ):
+        return False
+    return True
+
+
 def _discovery_model_should_belong(provider: str, model_id: str) -> bool:
     if not model_id:
         return False
@@ -440,6 +534,14 @@ def _discovery_model_should_belong(provider: str, model_id: str) -> bool:
         return _looks_like_lmstudio_discovery_model(model_id)
     if provider == "zai":
         return _looks_like_zai_discovery_model(model_id)
+    if provider == "anthropic":
+        return _looks_like_anthropic_discovery_model(model_id)
+    if provider == "deepseek":
+        return _looks_like_deepseek_discovery_model(model_id)
+    if provider == "groq":
+        return _looks_like_groq_discovery_model(model_id)
+    if provider == "gemini":
+        return _looks_like_gemini_discovery_model(model_id)
     return False
 
 
@@ -6880,6 +6982,14 @@ def upsert_auth_provider(provider: str, body: AuthProviderProfileBody):
     if not profile:
         raise HTTPException(status_code=400, detail=f"invalid credentials payload for {normalized_provider}")
 
+    # Reject a definitively-invalid key at entry time. Only when a new token is
+    # being set (not a base_url-only update) and never for lmstudio (local, no
+    # key to verify). _verify_provider_key raises HTTPException(400) on a hard
+    # rejection (400/401/403); transient/unverifiable outcomes are tolerated so
+    # a network blip can't block a legitimate save.
+    if access_token and normalized_provider != "lmstudio":
+        _verify_provider_key(normalized_provider, access_token)
+
     upsert_profile(normalized_provider, profile)
     return {"ok": True, "provider": normalized_provider}
 
@@ -6890,6 +7000,59 @@ def delete_auth_provider(provider: str):
     if not removed:
         return {"ok": False, "provider": normalized_provider, "removed": False}
     return {"ok": True, "provider": normalized_provider, "removed": True}
+
+
+def _verify_provider_key(provider: str, token: str) -> tuple[str, str]:
+    """Probe *provider* to check *token* is actually valid.
+
+    Returns ``(state, message)`` where state is:
+      - ``"ok"``           — provider accepted the key (HTTP 200/429)
+      - ``"no_endpoint"``  — no way to verify this provider remotely
+      - ``"unreachable"``  — had an endpoint but it didn't answer (404/5xx/network)
+
+    Raises ``HTTPException(400)`` when the provider *definitively* rejects the
+    key (HTTP 400/401/403) — that is a real "bad key" signal, distinct from a
+    transient failure callers may choose to tolerate.
+    """
+    endpoints = (
+        _AUTH_TEST_ENDPOINT_OVERRIDES.get(provider)
+        or _MODEL_DISCOVERY_ALT_ENDPOINTS.get(provider, [])
+    )
+    headers_template = (
+        _AUTH_TEST_HEADER_OVERRIDES.get(provider)
+        or _MODEL_DISCOVERY_HEADERS.get(provider, {})
+    )
+    if not (endpoints and headers_template):
+        return "no_endpoint", "not verifiable for this provider"
+
+    header = {key: value.format(token=token) for key, value in headers_template.items()}
+    last_error: str | None = None
+    for endpoint in endpoints:
+        try:
+            with httpx.Client(timeout=15) as client:
+                response = client.get(endpoint, headers=header)
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        code = response.status_code
+        if code == 200:
+            try:
+                models = _extract_discovery_models(response.json(), provider)
+                note = f" ({len(models)} models available)" if models else ""
+            except Exception:
+                note = ""
+            return "ok", f"Connected{note}"
+        if code == 429:
+            return "ok", "Key valid (rate-limited at test time)"
+        if code in (400, 401, 403):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{provider}: invalid API key (HTTP {code})",
+            )
+        last_error = f"HTTP {code}"
+        continue
+
+    return "unreachable", last_error or "no endpoint responded"
 
 
 def test_auth_provider(provider: str):
@@ -6927,11 +7090,21 @@ def test_auth_provider(provider: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not token:
         raise HTTPException(status_code=400, detail=f"{normalized_provider} token missing after load")
+
+    # Verify the key against the provider — a present-but-invalid key must fail.
+    # _verify_provider_key raises on a definitive rejection (400/401/403).
+    state, message = _verify_provider_key(normalized_provider, token)
+    if state == "unreachable":
+        # Test is strict: an endpoint exists but we couldn't confirm the key.
+        raise HTTPException(
+            status_code=400,
+            detail=f"{normalized_provider}: could not verify key ({message})",
+        )
     return {
         "ok": True,
         "provider": normalized_provider,
         "status": _build_auth_provider_payload(normalized_provider)["status"],
-        "message": "Token loaded successfully",
+        "message": message if state == "ok" else "Token saved (not verified against provider)",
     }
 
 
