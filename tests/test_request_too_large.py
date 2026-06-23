@@ -53,6 +53,38 @@ def test_genuine_rate_limit_still_classified():
     assert ai._is_rate_limit_exception(err) is True
 
 
+GEMINI_SPEND_CAP = (
+    "Error code: 429 - [{'error': {'code': 429, 'message': 'Your project has "
+    "exceeded its monthly spending cap. Please go to AI Studio at "
+    "https://ai.studio/spend to manage your project spend cap.', "
+    "'status': 'RESOURCE_EXHAUSTED'}}]"
+)
+
+
+def test_quota_exhausted_detects_spend_cap():
+    err = _http_error(429, GEMINI_SPEND_CAP)
+    assert ai._is_quota_exhausted(err) is True
+
+
+def test_quota_exhausted_detects_out_of_credits_and_insufficient_quota():
+    assert ai._is_quota_exhausted(RuntimeError("You're out of credits"))
+    assert ai._is_quota_exhausted(RuntimeError("error code: insufficient_quota"))
+
+
+def test_generic_rate_limit_is_not_quota_exhausted():
+    # A transient per-minute throttle must NOT be treated as persistent
+    # exhaustion (which would apply a 30+ minute backoff).
+    err = _http_error(429, "Rate limit reached for requests. Please try again in 1s.")
+    assert ai._is_quota_exhausted(err) is False
+    assert ai._is_rate_limit_exception(err) is True
+
+
+def test_spend_cap_is_not_request_too_large():
+    err = _http_error(429, GEMINI_SPEND_CAP)
+    assert ai._is_request_too_large(err) is False
+    assert ai._is_quota_exhausted(err) is True
+
+
 def test_groq_fallback_chain_routes_to_gemini():
     from forven.model_routing import get_fallback_chain
 
@@ -61,3 +93,26 @@ def test_groq_fallback_chain_routes_to_gemini():
     assert "gemini" in providers
     # Gemini (free, large context) must come before any paid provider.
     assert providers.index("gemini") < providers.index("openai")
+
+
+def test_provider_quota_alert_dedupes(forven_db):
+    """A persistent-exhaustion alert is raised once per provider per cooldown."""
+    from forven.agents.runner import _emit_provider_quota_alert
+    from forven.db import get_db
+
+    _emit_provider_quota_alert("gemini", "spend cap exceeded")
+    _emit_provider_quota_alert("gemini", "spend cap exceeded again")  # within cooldown
+
+    with get_db() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM activity_log WHERE source = 'provider:gemini'"
+        ).fetchone()["c"]
+    assert count == 1  # second call deduped, not flooding
+
+    # A different provider is tracked independently.
+    _emit_provider_quota_alert("groq", "out of credits")
+    with get_db() as conn:
+        groq_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM activity_log WHERE source = 'provider:groq'"
+        ).fetchone()["c"]
+    assert groq_count == 1

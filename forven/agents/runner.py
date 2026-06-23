@@ -14,6 +14,7 @@ from contextvars import Token
 from datetime import datetime, timedelta, timezone
 
 from forven.ai import (
+    _is_quota_exhausted,
     _is_rate_limit_exception,
     call_ai,
     is_transient_provider_exception,
@@ -22,7 +23,7 @@ from forven.ai import (
 from forven.async_utils import spawn
 from forven.context import build_agent_context
 from forven.cost_pricing import estimate_cost_usd
-from forven.db import claim_pending_agent_tasks, create_pending_task, format_prefixed_id, get_db, get_task_tool_calls, init_db, is_user_active, kv_get, log_activity
+from forven.db import claim_pending_agent_tasks, create_pending_task, format_prefixed_id, get_db, get_task_tool_calls, init_db, is_user_active, kv_get, kv_set, log_activity
 from forven.model_routing import get_fallback_chain
 from forven.research_context import build_research_context, coerce_research_contract
 from forven.task_timeouts import DEFAULT_AGENT_TASK_TIMEOUT_SECONDS, resolve_agent_task_timeout_seconds
@@ -61,6 +62,12 @@ log = logging.getLogger("forven.agents.runner")
 
 _MAX_RATE_LIMIT_RETRIES = 3
 _RATE_LIMIT_BACKOFF_MINUTES = (1, 2, 5)
+# Persistent quota/billing exhaustion (spend cap, out of credits): retrying
+# within minutes can't help, so back off on the scale of tens of minutes and
+# raise ONE deduped actionable alert per provider rather than per task.
+_MAX_QUOTA_EXHAUSTED_RETRIES = 3
+_QUOTA_EXHAUSTED_BACKOFF_MINUTES = (30, 60, 120)
+_PROVIDER_QUOTA_ALERT_COOLDOWN_MINUTES = 30
 _MAX_TRANSIENT_PROVIDER_RETRIES = 3
 _TRANSIENT_PROVIDER_BACKOFF_MINUTES = (2, 5, 10)
 # Missing/expired provider credentials are an OPERATOR-fixable condition, not a
@@ -475,8 +482,14 @@ def _requeue_agent_task(
     backoff_minutes: tuple[int, ...] | None = None,
     max_retries: int | None = None,
     exhausted_label: str = "retries exhausted",
+    quiet: bool = False,
 ) -> bool:
-    """Requeue a task for retry.  Returns False if the task has exceeded max retries."""
+    """Requeue a task for retry.  Returns False if the task has exceeded max retries.
+
+    ``quiet`` suppresses the per-requeue activity warning — used when the caller
+    raises its own (deduplicated) alert instead, to avoid flooding the alerts
+    panel when many tasks fail for the same persistent reason.
+    """
     with get_db() as conn:
         row = conn.execute("SELECT retry_count FROM agent_tasks WHERE id = ?", (task_id,)).fetchone()
         retry_count = int(row["retry_count"] or 0) if row else 0
@@ -512,12 +525,39 @@ def _requeue_agent_task(
                 task_id,
             ),
         )
+    if not quiet:
+        log_activity(
+            "warning",
+            f"agent:{agent_id}",
+            f"Task requeued (retry {retry_count + 1}, wait {delay_minutes}m): {title}",
+        )
+    return True
+
+
+def _emit_provider_quota_alert(provider: str, detail: str) -> None:
+    """Raise an actionable provider-exhaustion alert, deduped per provider.
+
+    A persistent quota/spend-cap failure affects every agent on that provider,
+    so without dedup the alerts panel floods. Emit at most one per provider per
+    cooldown window (tracked in the KV store so it survives across tasks).
+    """
+    provider_key = (provider or "unknown").strip().lower() or "unknown"
+    cooldown_key = f"forven:provider-quota-alert:{provider_key}"
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        last_ts = float(kv_get(cooldown_key, 0) or 0)
+    except (TypeError, ValueError):
+        last_ts = 0.0
+    if now - last_ts < _PROVIDER_QUOTA_ALERT_COOLDOWN_MINUTES * 60:
+        return
+    kv_set(cooldown_key, now)
     log_activity(
         "warning",
-        f"agent:{agent_id}",
-        f"Task requeued (retry {retry_count + 1}, wait {delay_minutes}m): {title}",
+        f"provider:{provider_key}",
+        f"{provider_key} quota/spend cap exhausted — tasks are retrying on a long "
+        f"backoff. Raise the cap / add credits, or switch the agents to another "
+        f"provider. Detail: {detail[:280]}",
     )
-    return True
 
 
 def _resolve_task_timeout_seconds(task_type: str) -> int:
@@ -1335,6 +1375,24 @@ async def _run_agent_task_inner(
         # errors: re-running the task can re-submit the order and open a duplicate
         # position. Fail safe instead (fall through to status='failed' + early
         # return below); the Brain/operator can re-evaluate explicitly.
+        # Persistent quota/billing exhaustion (spend cap, out of credits) is
+        # checked BEFORE the generic rate-limit branch: it won't clear on a
+        # minute-scale retry, so back off long and raise ONE deduped actionable
+        # alert per provider instead of flooding the alerts panel per task.
+        if _is_quota_exhausted(e) and not is_trade_execution_task:
+            _requeue_agent_task(
+                task_id,
+                agent_id,
+                task.get("title", ""),
+                f"Provider quota/spend cap exhausted: {error_summary[:350]}",
+                backoff_minutes=_QUOTA_EXHAUSTED_BACKOFF_MINUTES,
+                max_retries=_MAX_QUOTA_EXHAUSTED_RETRIES,
+                exhausted_label="Quota-exhaustion retries exhausted",
+                quiet=True,
+            )
+            _emit_provider_quota_alert(str(agent.get("model") or ""), error_summary)
+            return {"error": error_summary}
+
         if _is_rate_limit_exception(e) and not is_trade_execution_task:
             _requeue_agent_task(
                 task_id,

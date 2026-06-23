@@ -44,6 +44,20 @@ _REQUEST_TOO_LARGE_HINTS = (
     "too large for model",
     "request_too_large",
 )
+# PERSISTENT quota/billing exhaustion (spend cap, out of credits, monthly quota)
+# — distinct from a transient per-minute throttle. Retrying within minutes can
+# never help; the operator must raise the cap / add credits / switch provider.
+# These phrases are billing-specific so they won't match an ordinary 429.
+_QUOTA_EXHAUSTED_HINTS = (
+    "spend cap",
+    "spending cap",
+    "insufficient_quota",
+    "out of credits",
+    "credit balance",
+    "billing hard limit",
+    "exceeded your current quota",
+    "monthly spending",
+)
 _TRANSIENT_PROVIDER_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 _TRANSIENT_PROVIDER_HINTS = (
     "connecttimeout",
@@ -578,6 +592,24 @@ def _is_request_too_large(error: Exception) -> bool:
         except Exception:
             message = ""
         if any(hint in message for hint in _REQUEST_TOO_LARGE_HINTS):
+            return True
+    return False
+
+
+def _is_quota_exhausted(error: Exception) -> bool:
+    """True for PERSISTENT quota/billing exhaustion (spend cap, out of credits).
+
+    Distinct from a transient per-minute rate-limit: retrying within minutes
+    won't help — the operator must raise the cap / add credits / switch
+    provider. Callers use this to apply a long backoff and a single actionable
+    alert instead of fast per-task retries.
+    """
+    for node in _walk_exception_chain(error):
+        try:
+            message = str(node).lower()
+        except Exception:
+            message = ""
+        if any(hint in message for hint in _QUOTA_EXHAUSTED_HINTS):
             return True
     return False
 
