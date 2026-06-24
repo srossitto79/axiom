@@ -27,12 +27,27 @@
 		{ id: 'done', label: 'Done', critical: false, description: 'Review and finish.' },
 	];
 
-	const TRADING_SUBS_WIZARD = [
-		'trading-exchange',
-		'trading-credentials-hl',
-	];
-
 	let providersActive = false;
+	let selectedExchange = 'hyperliquid';
+
+	// Map exchange to credential subsection
+	function getCredentialSubsectionForExchange(exchange: string): string {
+		const map: Record<string, string> = {
+			hyperliquid: 'trading-credentials-hl',
+			binance: 'trading-credentials-binance',
+			kraken: 'trading-credentials-kraken',
+			okx: 'trading-credentials-okx',
+			coinbase: 'trading-credentials-coinbase',
+			generic_ccxt: 'trading-credentials-generic-ccxt',
+		};
+		return map[exchange] || 'trading-credentials-hl';
+	}
+
+	// Dynamic trading subsections based on selected exchange
+	$: TRADING_SUBS_WIZARD = [
+		'trading-exchange',
+		getCredentialSubsectionForExchange(selectedExchange),
+	];
 
 	async function refreshProviders() {
 		try {
@@ -71,8 +86,30 @@
 	onDestroy(stopAiPoll);
 
 	$: step = STEPS[$wizardStep] ?? STEPS[0];
+
+	// Track the exchange the user is currently choosing. A still-unsaved dropdown
+	// change lives in the save bar as a pending value; prefer it so the credential
+	// section and the "configured" check follow the selection immediately, before
+	// the user saves. Fall back to the saved setting, then the Hyperliquid default.
+	$: selectedExchange =
+		($pendingValues['exchange.exchange'] as string) ||
+		(typeof settings?.exchange === 'string' ? settings.exchange : '') ||
+		'hyperliquid';
+
+	// Check if current exchange has credentials configured
 	$: tradingSatisfied = Boolean(
-		settings?.hyperliquid_has_key && settings?.exchange === 'hyperliquid'
+		(() => {
+			const exchange = selectedExchange;
+			const hasKeyMap: Record<string, boolean> = {
+				hyperliquid: Boolean(settings?.hyperliquid_has_key),
+				binance: Boolean(settings?.binance_has_key),
+				kraken: Boolean(settings?.kraken_has_key),
+				okx: Boolean(settings?.okx_has_key),
+				coinbase: Boolean(settings?.coinbase_has_key),
+				generic_ccxt: Boolean(settings?.generic_ccxt_has_key),
+			};
+			return hasKeyMap[exchange] || false;
+		})()
 	);
 	$: aiSatisfied = providersActive;
 	// Notifications is optional, but once the user has entered either a bot

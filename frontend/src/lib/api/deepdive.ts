@@ -1,4 +1,4 @@
-import { ACTIVE_API_BASE, API_BASE, fetchApi } from './core';
+import { ACTIVE_API_BASE, API_BASE, buildAuthHeaders, fetchApi } from './core';
 
 export type DeepdiveThread = {
 	id: string;
@@ -83,7 +83,9 @@ export async function streamDeepdiveSend(
 	const url = `${resolveStreamBase()}/deepdive/threads/${encodeURIComponent(threadId)}/send`;
 	const r = await fetch(url, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		// See streamAssistantSend: streaming fetches must attach auth headers
+		// explicitly since they bypass the fetchApi() client.
+		headers: { 'content-type': 'application/json', ...buildAuthHeaders() },
 		body: JSON.stringify({ user_text: userText }),
 	});
 	if (!r.ok || !r.body) {

@@ -248,7 +248,7 @@ function resolveAuthHeaderValue(envKeys: string[], storageKeys: string[]): strin
 	return '';
 }
 
-function buildAuthHeaders(): Record<string, string> {
+export function buildAuthHeaders(): Record<string, string> {
 	const headers: Record<string, string> = {};
 	const apiKey = resolveAuthHeaderValue(
 		['VITE_FORVEN_API_KEY'],

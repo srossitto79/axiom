@@ -6,7 +6,7 @@
 	let acknowledged = true;
 
 	const STORAGE_KEY = 'forven.risk_disclaimer.ack';
-	const DISCLAIMER_URL = 'https://github.com/judder659/Forven/blob/main/DISCLAIMER.md';
+	const DISCLAIMER_URL = 'https://github.com/srossitto79/crypto-trading-research/blob/main/DISCLAIMER.md';
 
 	function acknowledge() {
 		acknowledged = true;

@@ -218,7 +218,7 @@
 
 	<div class="px-3 pb-2 text-center">
 		<a
-			href="https://github.com/judder659/Forven"
+			href="https://github.com/srossitto79/crypto-trading-research"
 			target="_blank"
 			rel="noopener noreferrer"
 			class="text-[10px] text-gray-600 hover:text-gray-400 transition-colors"

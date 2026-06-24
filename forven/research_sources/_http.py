@@ -30,7 +30,7 @@ from forven.security.url_safety import (  # noqa: F401 (re-exported for callers/
     _validate_public_url_static,
 )
 
-USER_AGENT = "forven-research-sources/1.0 (+https://github.com/judder659/Forven)"
+USER_AGENT = "forven-research-sources/1.0 (+https://github.com/srossitto79/crypto-trading-research)"
 
 # Max bytes we'll buffer from any single fetch. 5 MB is comfortably more than
 # a Reddit thread, GitHub README, or blog article, and small enough that an

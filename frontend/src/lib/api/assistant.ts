@@ -1,4 +1,4 @@
-import { ACTIVE_API_BASE, API_BASE, fetchApi } from './core';
+import { ACTIVE_API_BASE, API_BASE, buildAuthHeaders, fetchApi } from './core';
 import type { PageContext } from '$lib/stores/pageContext';
 
 export type AssistantThread = {
@@ -116,7 +116,10 @@ export async function streamAssistantSend(
 	const url = `${resolveStreamBase()}/assistant/threads/${encodeURIComponent(threadId)}/send`;
 	const r = await fetch(url, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		// Streaming fetches bypass the normal fetchApi() client, so the auth
+		// headers it adds must be attached explicitly here — otherwise the
+		// operator-gated /send endpoint rejects the request with 401.
+		headers: { 'content-type': 'application/json', ...buildAuthHeaders() },
 		body: JSON.stringify({
 			user_text: userText,
 			page_context: pageContext ?? null,

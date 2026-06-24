@@ -80,10 +80,34 @@
 		if (entry.id in pend) return pend[entry.id];
 		return initialValue(entry);
 	}
+
+	// Get current exchange from either pending values or settings
+	$: currentExchange = ($pendingValues['exchange.exchange'] as string) || (settings?.exchange as string) || 'hyperliquid';
+
+	// Map exchange to credential subsection
+	function getCredentialSubsectionForExchange(exchange: string): string {
+		const map: Record<string, string> = {
+			hyperliquid: 'trading-credentials-hl',
+			binance: 'trading-credentials-binance',
+			kraken: 'trading-credentials-kraken',
+			okx: 'trading-credentials-okx',
+			coinbase: 'trading-credentials-coinbase',
+			generic_ccxt: 'trading-credentials-generic-ccxt',
+		};
+		return map[exchange] || 'trading-credentials-hl';
+	}
+
+	// Filter subsections: hide credential sections not matching current exchange
+	$: filteredSubs = subs.filter((sub) => {
+		// Always show non-credential sections
+		if (!sub.id.startsWith('trading-credentials-')) return true;
+		// Show only the credential section for current exchange
+		return sub.id === getCredentialSubsectionForExchange(currentExchange);
+	});
 </script>
 
 <div class="space-y-6">
-	{#each subs as sub (sub.id)}
+	{#each filteredSubs as sub (sub.id)}
 		{@const entries = entriesBySub[sub.id] ?? []}
 		{@const usedBy = [...new Set(entries.flatMap((e) => e.usedBy))]}
 		<SettingsSubsection
