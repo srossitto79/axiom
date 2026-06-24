@@ -27,8 +27,18 @@ from forven.strategies.builtin.rule_engine import (
 def _build_system_prompt() -> str:
     lines: list[str] = []
     for meta in _indicators.metadata():
-        params = ", ".join(p["key"] for p in meta["params"]) or "none"
-        # Output series are referenced as the indicator's id plus these suffixes.
+        param_parts: list[str] = []
+        for p in meta["params"]:
+            pmin = p.get("min")
+            pmax = p.get("max")
+            pdef = p.get("default")
+            if pmin is not None and pmax is not None:
+                # Show as int when the value is whole, float otherwise (e.g. BB std dev)
+                fmt = lambda v: str(int(v)) if float(v) == int(float(v)) else str(round(float(v), 3))
+                param_parts.append(f"{p['key']} [{fmt(pmin)}–{fmt(pmax)}, default {fmt(pdef)}]")
+            else:
+                param_parts.append(p["key"])
+        params = ", ".join(param_parts) or "none"
         suffixes = meta["output_suffixes"]
         out_desc = ", ".join((f"<id>{s}" if s else "<id>") for s in suffixes)
         lines.append(
@@ -58,14 +68,17 @@ JSON shape:
 
 Rules:
 - Use ONLY these indicator kinds (give each instance a short lowercase id, then \
-reference its output series by that id plus the listed suffix):
+reference its output series by that id plus the listed suffix). \
+Each param shows its allowed range [min–max] and default — STAY WITHIN THESE RANGES:
 {indicator_catalog}
 - Reference an indicator output, or a raw data column, as a bare string. Raw columns: {raw_cols}.
 - A {{"param": "name"}} operand reads an editable knob from "params"; a bare number is a constant.
 - Operators allowed: {operators}. Use crosses_above/crosses_below for crossovers.
 - Provide at least one entry side (entry_long or entry_short). Set unused sides to null.
-- Prefer putting tunable thresholds (e.g. 30, 70, 200) into "params" and referencing them, \
+- Prefer putting tunable thresholds (e.g. 30, 70) into "params" and referencing them, \
 so the user can adjust them later.
+- CRITICAL: All period/length/lookback params must be ≤ 200. The backtest engine \
+requires more bars than the longest lookback, so 210+ period indicators will fail at runtime.
 - Keep ids and column names lowercase. Do NOT invent indicator kinds or operators."""
 
 

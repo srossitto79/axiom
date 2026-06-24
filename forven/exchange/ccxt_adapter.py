@@ -91,11 +91,21 @@ class CCXTExchange(ExchangeInterface):
             **exchange_kwargs,
         }
 
-        # Enable testnet if requested and available
-        if testnet and hasattr(exchange_class, "has") and exchange_class.has.get("sandbox"):
-            exchange_config["sandbox"] = True
-
         self.ccxt_exchange = exchange_class(exchange_config)
+
+        # Enable testnet/demo mode.
+        # Binance USDT-M futures testnet was deprecated in CCXT — use enable_demo_trading()
+        # instead. All other exchanges use set_sandbox_mode().
+        if testnet:
+            try:
+                if hasattr(self.ccxt_exchange, 'enable_demo_trading'):
+                    self.ccxt_exchange.enable_demo_trading(True)
+                    log.info("Demo trading mode enabled for %s", self.exchange_id)
+                else:
+                    self.ccxt_exchange.set_sandbox_mode(True)
+                    log.info("Sandbox/testnet mode enabled for %s", self.exchange_id)
+            except Exception as e:
+                log.warning("Could not enable testnet/demo mode for %s: %s", self.exchange_id, e)
 
     # ======================== Account & Positions ========================
 

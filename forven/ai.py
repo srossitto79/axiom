@@ -160,6 +160,8 @@ ENDPOINTS = {
     "minimax": "https://api.minimax.io/anthropic/v1/messages",
     "zai": "https://api.z.ai/api/paas/v4/chat/completions",
     "openrouter": "https://openrouter.ai/api/v1/chat/completions",
+    "deepseek": "https://api.deepseek.com/v1/chat/completions",
+    "anthropic": "https://api.anthropic.com/v1/messages",
     "groq": "https://api.groq.com/openai/v1/chat/completions",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
     "cerebras": "https://api.cerebras.ai/v1/chat/completions",
@@ -490,6 +492,13 @@ def normalize_provider_and_model(provider: str | None, model: str | None = None)
     if normalized_provider == "zai":
         return "zai", _normalize_zai_model(normalized_model)
 
+    # Providers that have their own model namespace — never reroute to openai.
+    _PASS_THROUGH_PROVIDERS = frozenset({
+        "deepseek", "anthropic", "groq", "gemini", "cerebras", "mistral", "xai", "together",
+    })
+    if normalized_provider in _PASS_THROUGH_PROVIDERS:
+        return normalized_provider, normalized_model
+
     # Unknown provider — infer by model naming where possible
     if _looks_like_openai_model(normalized_model):
         return "openai", _normalize_openai_model(normalized_model)
@@ -497,8 +506,6 @@ def normalize_provider_and_model(provider: str | None, model: str | None = None)
         return "minimax", _normalize_minimax_model(normalized_model)
     if _looks_like_zai_model(normalized_model):
         return "zai", _normalize_zai_model(normalized_model)
-    if normalized_provider == "lmstudio":
-        return "lmstudio", _normalize_lmstudio_model(normalized_model)
     if normalized_provider in ENDPOINTS:
         return normalized_provider, normalized_model
     return "openai", _normalize_openai_model(normalized_model)

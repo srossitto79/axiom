@@ -220,12 +220,15 @@ TYPE_NAME = "my_strategy"
 			if (res.spec) {
 				currentSpec = clone(res.spec as unknown as RuleSpec);
 				currentLibraryId = null;
-				mode = 'visual';
 				if (res.valid) {
+					mode = 'visual';
 					addToast('Generated a strategy from your description — review & tweak it.', 'success');
 				} else {
-					aiError = (res.errors ?? []).join(' ');
-					addToast('Generated a draft, but it needs fixes (see the builder warnings).', 'info');
+					// Stay in AI mode so the user can see the error and refine their prompt.
+					// The spec is applied to currentSpec so it pre-populates Visual when they switch.
+					aiError = (res.errors ?? []).join(' ') ||
+						'The AI produced a draft but it\'s missing required conditions. Describe specific entry rules (e.g. "Buy when RSI < 30 and close > EMA 200").';
+					addToast('Draft generated, but entry conditions are missing — refine your prompt.', 'info');
 				}
 			} else {
 				aiError = (res.errors ?? ['Could not generate a spec.']).join(' ');
@@ -718,8 +721,8 @@ TYPE_NAME = "my_strategy"
 							<StrategyBuilder {indicators} initialSpec={currentSpec} disabled={busy} on:change={onBuilderChange} />
 						{:else if mode === 'ai'}
 							<div class="space-y-3">
-								<p class="text-[12px] text-gray-500">Describe your idea in plain English. The AI drafts an editable rule spec, validated against the engine.</p>
-								<textarea bind:value={aiPrompt} rows="4" placeholder="e.g. Buy when RSI drops below 30 and price is above the 200 EMA; sell when RSI goes above 60."
+								<p class="text-[12px] text-gray-500">Describe specific entry/exit <strong class="text-gray-400">rules</strong> in plain English — the AI converts them into an editable visual spec. Use concrete conditions, not research questions.</p>
+								<textarea bind:value={aiPrompt} rows="4" placeholder="e.g. Buy when RSI(14) drops below 30 and close is above EMA(200). Sell when RSI goes above 70 or close crosses below EMA(50)."
 									class="w-full resize-y rounded border border-[#2b2b2b] bg-black px-3 py-2 text-[13px] text-gray-200 outline-none transition focus:border-cyan-400/60"></textarea>
 								<button type="button" on:click={generateFromNl} disabled={aiLoading || !aiPrompt.trim()}
 									class="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-1.5 text-[12px] font-medium text-cyan-200 transition hover:bg-cyan-500/20 disabled:opacity-40">

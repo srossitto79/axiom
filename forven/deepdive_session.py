@@ -15,7 +15,7 @@ from forven.deepdive_db import (
 
 log = logging.getLogger("forven.deepdive")
 
-MAX_TOOL_ROUNDS = 8
+MAX_TOOL_ROUNDS = 30
 
 # Providers that accept Anthropic Messages format (tool_use / tool_result blocks).
 _ANTHROPIC_FORMAT_PROVIDERS = {"anthropic", "minimax"}

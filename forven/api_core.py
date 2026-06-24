@@ -2276,6 +2276,12 @@ def _apply_settings_section(section: str, payload: dict) -> dict:
             # Multiple exchanges supported via CCXT. Validate and set.
             supported_exchanges = {"hyperliquid", "binance", "kraken", "okx", "coinbase", "generic_ccxt"}
             updates["exchange"] = exchange if exchange in supported_exchanges else "hyperliquid"
+            # Drop the cached exchange singleton so the next call re-reads the setting.
+            try:
+                from forven.exchange.sync_wrapper import reset_sync_exchange
+                reset_sync_exchange()
+            except Exception:
+                pass
 
     elif section == "hyperliquid":
         wallet_payload_key = None
@@ -3009,6 +3015,15 @@ def _apply_settings_section(section: str, payload: dict) -> dict:
         updates["discord_bot_token_source"] = "none"
 
     _save_settings_secrets(secrets)
+
+    # When exchange credentials change, drop the cached exchange singleton so the
+    # next call picks up the freshly-saved keys.
+    if section in {"binance", "kraken", "okx", "coinbase", "generic-ccxt", "hyperliquid"}:
+        try:
+            from forven.exchange.sync_wrapper import reset_sync_exchange
+            reset_sync_exchange()
+        except Exception:
+            pass
 
     updates["updated_at"] = _now()
 

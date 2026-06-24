@@ -127,6 +127,7 @@
 					value={displayValue(entry)}
 					type={entry.type}
 					options={entry.options ?? []}
+					configured={entry.configuredByPath ? Boolean(settings?.[entry.configuredByPath]) : false}
 				/>
 			{/each}
 			{#if sub.id === 'trading-credentials-hl'}

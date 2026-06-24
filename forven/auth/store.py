@@ -522,24 +522,56 @@ def credential_status(provider: str) -> str:
 
 
 def get_status_rows() -> list[tuple[str, str, str]]:
-    """Get auth status as table rows: (provider, status, expires)."""
+    """Get auth status as table rows: (provider, status, expires).
+
+    Covers all supported providers, not just the original OAuth trio.
+    Providers with no profile and no env override are omitted to keep the
+    output concise (only show what's relevant to the current install).
+    """
     store = load_auth()
     rows = []
-    for provider in ["openai", "minimax", "lmstudio"]:
+    seen: set[str] = set()
+
+    # Build ordered list: configured providers first, then any remaining supported ones.
+    configured = [
+        key.removesuffix(":default")
+        for key in store.get("profiles", {})
+        if key.endswith(":default")
+    ]
+    ordered = list(dict.fromkeys(configured + sorted(_SUPPORTED_AUTH_PROVIDERS)))
+
+    for provider in ordered:
+        if provider in seen:
+            continue
+        seen.add(provider)
+
         profile = store["profiles"].get(f"{provider}:default")
-        if not profile:
-            rows.append((provider, "[red]Not configured[/red]", "-"))
+        env = _env_profile(provider)
+
+        # Skip entirely unconfigured providers — no noise for providers the
+        # user hasn't set up yet.
+        if not profile and not env:
             continue
 
         if provider == "lmstudio":
-            base_url = str(profile.get("base_url") or "").strip()
+            p = profile or env or {}
+            base_url = str(p.get("base_url") or "").strip()
             if base_url:
                 rows.append((provider, "[green]Active[/green]", base_url))
             else:
                 rows.append((provider, "[red]Not configured[/red]", "-"))
             continue
 
-        expires = profile.get("expires")
+        # Env-var override always counts as active.
+        if env and not profile:
+            rows.append((provider, "[green]Active (env)[/green]", "via environment"))
+            continue
+
+        if is_profile_opaque(profile):
+            rows.append((provider, "[red]Opaque (re-save key)[/red]", "-"))
+            continue
+
+        expires = (profile or {}).get("expires")
         if not expires:
             rows.append((provider, "[green]Active[/green]", "No expiry"))
             continue
@@ -553,10 +585,7 @@ def get_status_rows() -> list[tuple[str, str, str]]:
             remaining = expires - now_ms
             hours = int(remaining / 3600000)
             days = hours // 24
-            if days > 0:
-                exp_str = f"{days}d {hours % 24}h remaining"
-            else:
-                exp_str = f"{hours}h remaining"
+            exp_str = f"{days}d {hours % 24}h remaining" if days > 0 else f"{hours}h remaining"
             rows.append((provider, "[green]Active[/green]", exp_str))
 
     return rows

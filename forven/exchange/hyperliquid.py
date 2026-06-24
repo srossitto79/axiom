@@ -2219,15 +2219,11 @@ _default_exchange: "ExchangeInterface | None" = None
 
 
 def get_exchange(testnet: bool = True) -> "ExchangeInterface":
-    """Get or create the default exchange instance (HyperliquidExchange).
-
-    Returns:
-        ExchangeInterface: The active exchange (HyperliquidExchange by default).
-    """
+    """Get or create the default exchange instance, respecting the configured exchange setting."""
     global _default_exchange
     if _default_exchange is None:
-        from forven.exchange.hyperliquid_adapter import HyperliquidExchange
-        _default_exchange = HyperliquidExchange(testnet=testnet)
+        from forven.exchange.sync_wrapper import _build_exchange_for_settings
+        _default_exchange = _build_exchange_for_settings(testnet)
     return _default_exchange
 
 

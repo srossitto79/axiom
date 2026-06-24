@@ -124,6 +124,7 @@
 
 	async function loadAll() {
 		error = '';
+		loading = true;
 		try {
 			const [snap, list] = await Promise.all([
 				getDiagnosticsSnapshot(),

@@ -81,25 +81,24 @@ def check_database() -> CheckResult:
 def check_auth_providers() -> CheckResult:
     """At least one provider has a usable token."""
     try:
-        from forven.auth.store import get_status_rows
-        rows = list(get_status_rows())
+        from forven.auth.store import credential_status, _SUPPORTED_AUTH_PROVIDERS
         usable: list[str] = []
         opaque: list[str] = []
-        for row in rows:
-            # row is (provider, status, expires) or similar tuple
-            provider = str(row[0] if row else "")
-            state = str(row[1] if len(row) > 1 else "").lower()
-            if "opaque" in state or "decrypt" in state:
-                opaque.append(provider)
-                continue
-            if any(s in state for s in ("active", "ok", "valid", "ready")):
+        missing: list[str] = []
+        for provider in sorted(_SUPPORTED_AUTH_PROVIDERS):
+            status = credential_status(provider)
+            if status == "ok":
                 usable.append(provider)
+            elif status == "opaque":
+                opaque.append(provider)
+            elif status == "missing":
+                missing.append(provider)
         if not usable:
             return CheckResult(
                 "auth_providers",
                 WARN,
                 "no provider has a valid token",
-                {"opaque": opaque, "rows": [list(r) for r in rows]},
+                {"opaque": opaque, "missing": missing},
             )
         return CheckResult(
             "auth_providers",

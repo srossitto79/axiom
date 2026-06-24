@@ -43,8 +43,8 @@ class SyncExchange:
     For async code, use the interface directly instead.
     """
 
-    def __init__(self, exchange: Optional[ExchangeInterface] = None, testnet: bool = True):
-        self.exchange = exchange or HyperliquidExchange(testnet=testnet)
+    def __init__(self, exchange: Optional[ExchangeInterface] = None, testnet: bool = False):
+        self.exchange = exchange if exchange is not None else _build_exchange_for_settings(testnet)
 
     def get_account_value(self) -> float:
         """Get total account value in USD."""
@@ -166,9 +166,70 @@ class SyncExchange:
 _default_sync_exchange: Optional[SyncExchange] = None
 
 
-def get_sync_exchange(testnet: bool = True) -> SyncExchange:
-    """Get or create the default sync exchange wrapper."""
+def _build_exchange_for_settings(testnet: bool) -> ExchangeInterface:
+    """Instantiate the correct ExchangeInterface based on the configured exchange setting."""
+    try:
+        from forven.api_core import _load_settings_payload, _load_settings_secrets
+        s = _load_settings_payload()
+        exchange_name = str(s.get("exchange") or "hyperliquid").strip().lower()
+        secrets = _load_settings_secrets()
+    except Exception:
+        exchange_name = "hyperliquid"
+        secrets = {}
+
+    if exchange_name == "hyperliquid":
+        return HyperliquidExchange(testnet=testnet)
+
+    # All non-Hyperliquid exchanges go through CCXT.
+    from forven.exchange.ccxt_adapter import CCXTExchange
+
+    # Map Forven exchange names to CCXT exchange IDs.
+    # binance → binanceusdm: spot (ccxt.binance) has no positions or perp contracts.
+    # USDT-M Futures is the correct choice for Hyperliquid-equivalent perpetual trading.
+    ccxt_id_map = {
+        "binance": "binanceusdm",
+        "kraken": "kraken",
+        "okx": "okx",
+        "coinbase": "coinbase",
+        "generic_ccxt": str(secrets.get("generic_ccxt_exchange") or "binance").strip().lower(),
+    }
+    exchange_id = ccxt_id_map.get(exchange_name, exchange_name)
+
+    # Pull credentials from the secrets store.
+    key_prefix = exchange_name if exchange_name != "generic_ccxt" else "generic_ccxt"
+    api_key = str(secrets.get(f"{key_prefix}_api_key") or "").strip() or None
+    api_secret = str(secrets.get(f"{key_prefix}_api_secret") or "").strip() or None
+    passphrase = str(secrets.get(f"{key_prefix}_api_passphrase") or "").strip() or None
+
+    kwargs: dict = {}
+    if passphrase:
+        kwargs["password"] = passphrase
+
+    use_testnet = bool(s.get(f"{key_prefix}_testnet", testnet))
+    return CCXTExchange(
+        exchange_id=exchange_id,
+        api_key=api_key,
+        api_secret=api_secret,
+        testnet=use_testnet,
+        **kwargs,
+    )
+
+
+def get_sync_exchange(testnet: bool = False) -> SyncExchange:
+    """Get or create the default sync exchange wrapper, respecting the configured exchange."""
     global _default_sync_exchange
     if _default_sync_exchange is None:
-        _default_sync_exchange = SyncExchange(testnet=testnet)
+        _default_sync_exchange = SyncExchange(_build_exchange_for_settings(testnet), testnet=testnet)
     return _default_sync_exchange
+
+
+def reset_sync_exchange() -> None:
+    """Force recreation of both exchange singletons — call after changing exchange settings."""
+    global _default_sync_exchange
+    _default_sync_exchange = None
+    # Also reset the hyperliquid.py singleton so get_exchange() re-reads the setting.
+    try:
+        from forven.exchange import hyperliquid as _hl
+        _hl._default_exchange = None
+    except Exception:
+        pass

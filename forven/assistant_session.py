@@ -42,7 +42,7 @@ from forven.db import kv_get
 
 log = logging.getLogger("forven.assistant")
 
-MAX_TOOL_ROUNDS = 8
+MAX_TOOL_ROUNDS = 30
 # Cap how much history we replay to the model per turn (bounds cost on a
 # long-lived global thread). The converters tolerate a tool row that lands at
 # the cut boundary without a preceding assistant.
