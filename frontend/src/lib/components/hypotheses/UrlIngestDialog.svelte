@@ -2,51 +2,189 @@
 	import { createEventDispatcher } from 'svelte';
 	import {
 		createHypothesisFromUrl,
+		createHypothesisFromUrls,
 		previewHypothesisFromUrl,
 		type UrlPreviewSuccess,
+		type UrlSourceResult,
 	} from '$lib/api';
 
 	export let open = false;
 
-	const dispatch = createEventDispatcher<{ created: { id: string }; close: void }>();
+	const dispatch = createEventDispatcher<{
+		created: { id: string };
+		createdBulk: { ids: string[] };
+		close: void;
+	}>();
 
-	type Step = 'input' | 'preview' | 'submitting';
+	type Step = 'input' | 'preview' | 'submitting' | 'done';
 	let step: Step = 'input';
-	let url = '';
+
+	let urlsRaw = '';
+
+	// Single-URL rich path — set only when exactly one URL is pasted and it
+	// previews OK. Keeps the original "edit metadata then create one" experience.
+	let preview: UrlPreviewSuccess | null = null;
 	let title = '';
 	let marketThesis = '';
 	let mechanism = '';
 	let claimedEdge = '';
-	let preview: UrlPreviewSuccess | null = null;
+
+	// Multi-URL path: one row per pasted URL.
+	interface PreviewRow {
+		raw: string;
+		ok: boolean;
+		sourceType?: string | null;
+		title?: string;
+		canonicalUrl?: string;
+		contentBytes?: number;
+		errorMsg?: string;
+	}
+	let rows: PreviewRow[] = [];
+
+	interface CreateResult {
+		raw: string;
+		ok: boolean;
+		id?: string;
+		errorMsg?: string;
+	}
+	let createResults: CreateResult[] = [];
+	let createProgress: { done: number; total: number } | null = null;
+
+	// Combine mode: merge all pasted URLs into ONE crucible with every source
+	// attached, instead of one crucible per URL.
+	let combineMode = false;
+	let combinedResult: { id: string; sources: UrlSourceResult[] } | null = null;
+
 	let errorMsg: string | null = null;
 	let previewing = false;
 
-	$: canPreview = url.trim().length > 0 && !previewing && step !== 'submitting';
+	$: parsedCount = parseUrls(urlsRaw).length;
+	$: canPreview = parsedCount > 0 && !previewing && step !== 'submitting';
+	$: okRows = rows.filter((r) => r.ok);
 
-	function close(): void {
+	function parseUrls(raw: string): string[] {
+		const seen = new Set<string>();
+		const out: string[] = [];
+		for (const line of raw.split(/\r?\n/)) {
+			const u = line.trim();
+			if (!u || seen.has(u)) continue;
+			seen.add(u);
+			out.push(u);
+		}
+		return out;
+	}
+
+	function resetState(): void {
 		step = 'input';
-		url = '';
+		urlsRaw = '';
+		preview = null;
 		title = '';
 		marketThesis = '';
 		mechanism = '';
 		claimedEdge = '';
-		preview = null;
+		rows = [];
+		createResults = [];
+		createProgress = null;
+		combineMode = false;
+		combinedResult = null;
 		errorMsg = null;
 		previewing = false;
+	}
+
+	function close(): void {
+		resetState();
 		dispatch('close');
+	}
+
+	function backToInput(): void {
+		step = 'input';
+		preview = null;
+		rows = [];
+		createResults = [];
+		createProgress = null;
+		combineMode = false;
+		combinedResult = null;
+		errorMsg = null;
+	}
+
+	function removeRow(raw: string): void {
+		rows = rows.filter((r) => r.raw !== raw);
+		if (rows.length === 0) backToInput();
+	}
+
+	// Run an async fn over items with bounded concurrency, preserving order. The
+	// fn must not throw (callers catch internally) so one bad item never aborts
+	// the batch.
+	async function mapLimit<T, R>(
+		items: T[],
+		limit: number,
+		fn: (item: T, index: number) => Promise<R>,
+	): Promise<R[]> {
+		const out: R[] = new Array(items.length);
+		let cursor = 0;
+		async function worker(): Promise<void> {
+			while (cursor < items.length) {
+				const i = cursor++;
+				out[i] = await fn(items[i], i);
+			}
+		}
+		await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+		return out;
 	}
 
 	async function handlePreview(): Promise<void> {
 		errorMsg = null;
+		const urls = parseUrls(urlsRaw);
+		if (urls.length === 0) {
+			errorMsg = 'Enter at least one URL.';
+			return;
+		}
 		previewing = true;
+		preview = null;
+		rows = [];
 		try {
-			const res = await previewHypothesisFromUrl(url.trim());
-			if (!res.ok) {
-				errorMsg = `${res.error_code}: ${res.error}`;
+			if (urls.length === 1) {
+				// Single-URL rich path — identical to the original behavior.
+				const res = await previewHypothesisFromUrl(urls[0]);
+				if (!res.ok) {
+					errorMsg = `${res.error_code}: ${res.error}`;
+					return;
+				}
+				preview = res;
+				title = res.title || '';
+				step = 'preview';
 				return;
 			}
-			preview = res;
-			title = res.title || '';
+
+			// Multi-URL: preview each (throttled — every preview is a network +
+			// extraction call against external providers).
+			rows = await mapLimit(urls, 4, async (u): Promise<PreviewRow> => {
+				try {
+					const res = await previewHypothesisFromUrl(u);
+					if (res.ok) {
+						return {
+							raw: u,
+							ok: true,
+							sourceType: res.source_type,
+							title: res.title,
+							canonicalUrl: res.url,
+							contentBytes: res.content_bytes,
+						};
+					}
+					return {
+						raw: u,
+						ok: false,
+						sourceType: res.source_type ?? null,
+						errorMsg: `${res.error_code}: ${res.error}`,
+					};
+				} catch (err) {
+					return {
+						raw: u,
+						ok: false,
+						errorMsg: err instanceof Error ? err.message : 'Preview failed.',
+					};
+				}
+			});
 			step = 'preview';
 		} catch (err) {
 			errorMsg = err instanceof Error ? err.message : 'Preview failed.';
@@ -56,37 +194,92 @@
 	}
 
 	async function handleCreate(): Promise<void> {
-		if (!preview) return;
-		errorMsg = null;
-		step = 'submitting';
-		try {
-			const res = await createHypothesisFromUrl({
-				url: preview.url,
-				title: title.trim() || undefined,
-				market_thesis: marketThesis.trim() || undefined,
-				mechanism: mechanism.trim() || undefined,
-				claimed_edge: claimedEdge.trim() || undefined,
-			});
-			if (!res.ok) {
-				errorMsg = `${res.error_code}: ${res.error}`;
+		if (preview) {
+			// Single-URL rich path — original behavior (create one, then navigate).
+			errorMsg = null;
+			step = 'submitting';
+			try {
+				const res = await createHypothesisFromUrl({
+					url: preview.url,
+					title: title.trim() || undefined,
+					market_thesis: marketThesis.trim() || undefined,
+					mechanism: mechanism.trim() || undefined,
+					claimed_edge: claimedEdge.trim() || undefined,
+				});
+				if (!res.ok) {
+					errorMsg = `${res.error_code}: ${res.error}`;
+					step = 'preview';
+					return;
+				}
+				dispatch('created', { id: res.hypothesis.id });
+				close();
+			} catch (err) {
+				errorMsg = err instanceof Error ? err.message : 'Create failed.';
 				step = 'preview';
-				return;
 			}
-			dispatch('created', { id: res.hypothesis.id });
-			close();
-		} catch (err) {
-			errorMsg = err instanceof Error ? err.message : 'Create failed.';
-			step = 'preview';
+			return;
 		}
-	}
 
-	function backToInput(): void {
-		step = 'input';
-		preview = null;
+		const targets = rows.filter((r) => r.ok && r.canonicalUrl);
+		if (targets.length === 0) return;
 		errorMsg = null;
+
+		if (combineMode) {
+			// Merge all ready sources into a single crucible (one backend call).
+			createResults = [];
+			createProgress = null;
+			combinedResult = null;
+			step = 'submitting';
+			try {
+				const res = await createHypothesisFromUrls({
+					urls: targets.map((r) => r.canonicalUrl as string),
+				});
+				if (!res.ok) {
+					errorMsg = `${res.error_code}: ${res.error}`;
+					step = 'preview';
+					return;
+				}
+				combinedResult = { id: res.hypothesis.id, sources: res.sources };
+				dispatch('createdBulk', { ids: [res.hypothesis.id] });
+				step = 'done';
+			} catch (err) {
+				errorMsg = err instanceof Error ? err.message : 'Create failed.';
+				step = 'preview';
+			}
+			return;
+		}
+
+		// Multi-URL: create each ready row sequentially so partial failures are
+		// independent and the active-pool cap is respected one item at a time.
+		createResults = [];
+		createProgress = { done: 0, total: targets.length };
+		step = 'submitting';
+		for (const row of targets) {
+			let result: CreateResult;
+			try {
+				const res = await createHypothesisFromUrl({ url: row.canonicalUrl as string });
+				result = res.ok
+					? { raw: row.raw, ok: true, id: res.hypothesis.id }
+					: { raw: row.raw, ok: false, errorMsg: `${res.error_code}: ${res.error}` };
+			} catch (err) {
+				result = {
+					raw: row.raw,
+					ok: false,
+					errorMsg: err instanceof Error ? err.message : 'Create failed.',
+				};
+			}
+			createResults = [...createResults, result];
+			createProgress = { done: createResults.length, total: targets.length };
+		}
+		const createdIds = createResults.filter((r) => r.ok && r.id).map((r) => r.id as string);
+		if (createdIds.length > 0) dispatch('createdBulk', { ids: createdIds });
+		createProgress = null;
+		step = 'done';
 	}
 
 	function onBackdropClick(event: MouseEvent): void {
+		// Don't tear down state while a batch create loop is mid-flight.
+		if (step === 'submitting') return;
 		if (event.target === event.currentTarget) close();
 	}
 </script>
@@ -95,7 +288,7 @@
 	<div
 		class="fixed inset-0 z-50 flex items-start justify-center bg-black/70 px-4 py-10 backdrop-blur-sm"
 		on:click={onBackdropClick}
-		on:keydown={(e) => e.key === 'Escape' && close()}
+		on:keydown={(e) => e.key === 'Escape' && step !== 'submitting' && close()}
 		role="presentation"
 	>
 		<div
@@ -110,9 +303,10 @@
 				</h2>
 				<button
 					type="button"
-					class="text-gray-500 hover:text-white"
+					class="text-gray-500 hover:text-white disabled:opacity-40"
 					aria-label="Close"
-					on:click={close}
+					disabled={step === 'submitting'}
+					on:click={() => step !== 'submitting' && close()}
 				>
 					✕
 				</button>
@@ -127,18 +321,22 @@
 
 				{#if step === 'input'}
 					<label class="block text-xs uppercase tracking-[0.18em] text-gray-400">
-						URL
-						<input
-							bind:value={url}
-							type="url"
-							placeholder="https://youtube.com/... or reddit/github/blog URL"
-							class="mt-2 w-full border border-[#2a2a2a] bg-[#141414] px-3 py-2 text-sm text-white outline-none placeholder:text-gray-600 focus:border-cyan-400"
+						URL(s)
+						<textarea
+							bind:value={urlsRaw}
+							rows="4"
+							placeholder={'https://youtube.com/... or reddit/github/blog URL\nPaste several — one URL per line'}
+							class="mt-2 w-full resize-y border border-[#2a2a2a] bg-[#141414] px-3 py-2 font-mono text-sm text-white outline-none placeholder:text-gray-600 focus:border-cyan-400"
 							autocomplete="off"
-						/>
+						></textarea>
 					</label>
 					<p class="text-[11px] text-gray-500">
-						We auto-detect YouTube, Reddit, GitHub, known forums, or fall back to article extraction.
+						We auto-detect YouTube, Reddit, GitHub, known forums, or fall back to article
+						extraction. Add several at once — one URL per line.
 					</p>
+					{#if parsedCount > 1}
+						<p class="text-[11px] text-cyan-300">{parsedCount} URLs detected.</p>
+					{/if}
 					<div class="flex justify-end gap-2 pt-2">
 						<button
 							type="button"
@@ -153,7 +351,7 @@
 							on:click={handlePreview}
 							disabled={!canPreview}
 						>
-							{previewing ? 'Fetching…' : 'Preview'}
+							{previewing ? 'Fetching…' : parsedCount > 1 ? `Preview ${parsedCount}` : 'Preview'}
 						</button>
 					</div>
 				{/if}
@@ -237,9 +435,157 @@
 					</div>
 				{/if}
 
+				{#if step === 'preview' && !preview}
+					<div class="text-[11px] uppercase tracking-[0.18em] text-gray-400">
+						{okRows.length} of {rows.length} ready{rows.length - okRows.length > 0
+							? ` · ${rows.length - okRows.length} failed`
+							: ''}
+					</div>
+					<div class="max-h-80 space-y-2 overflow-auto pr-1">
+						{#each rows as row (row.raw)}
+							<div
+								class="flex items-start gap-3 border px-3 py-2 {row.ok
+									? 'border-[#262626] bg-[#111]'
+									: 'border-rose-900/50 bg-rose-950/20'}"
+							>
+								<div class="min-w-0 flex-1">
+									<div class="truncate text-sm text-white">{row.title || row.raw}</div>
+									<div class="truncate text-[11px] text-gray-500">{row.raw}</div>
+									{#if row.ok}
+										<div class="mt-1 text-[11px] text-emerald-300">
+											{row.sourceType} · {(row.contentBytes ?? 0).toLocaleString()} bytes
+										</div>
+									{:else}
+										<div class="mt-1 text-[11px] text-rose-300">{row.errorMsg}</div>
+									{/if}
+								</div>
+								<button
+									type="button"
+									class="shrink-0 text-gray-600 hover:text-white"
+									aria-label="Remove {row.raw}"
+									on:click={() => removeRow(row.raw)}
+								>
+									✕
+								</button>
+							</div>
+						{/each}
+					</div>
+					<label class="flex items-start gap-2 border border-[#262626] bg-[#111] px-3 py-2 text-[11px] text-gray-300">
+						<input type="checkbox" bind:checked={combineMode} class="mt-0.5 accent-cyan-500" />
+						<span>
+							<span class="text-gray-200">Combine into a single crucible.</span>
+							All sources are attached to one crucible (use this when the URLs cover the
+							same topic). Leave unchecked to create one crucible per URL.
+						</span>
+					</label>
+					<p class="text-[11px] text-gray-500">
+						Titles and theses are filled in automatically by the research agent.
+					</p>
+					<div class="flex justify-end gap-2 pt-2">
+						<button
+							type="button"
+							class="border border-[#2d2d2d] bg-[#141414] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400 hover:border-gray-400 hover:text-white"
+							on:click={backToInput}
+						>
+							Back
+						</button>
+						<button
+							type="button"
+							class="border border-green-600/60 bg-green-950/40 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-green-100 hover:bg-green-900/60 disabled:opacity-50"
+							on:click={handleCreate}
+							disabled={okRows.length === 0}
+						>
+							{#if combineMode}
+								Create 1 crucible from {okRows.length} source{okRows.length === 1 ? '' : 's'}
+							{:else}
+								Create {okRows.length} crucible{okRows.length === 1 ? '' : 's'}
+							{/if}
+						</button>
+					</div>
+				{/if}
+
 				{#if step === 'submitting'}
 					<div class="flex items-center justify-center py-6 text-xs uppercase tracking-[0.18em] text-gray-400">
-						Creating crucible…
+						{#if createProgress}
+							Creating {createProgress.done}/{createProgress.total}…
+						{:else}
+							Creating crucible…
+						{/if}
+					</div>
+				{/if}
+
+				{#if step === 'done' && combinedResult}
+					{@const okSources = combinedResult.sources.filter((s) => s.ok)}
+					{@const failedSources = combinedResult.sources.filter((s) => !s.ok)}
+					<div class="text-sm text-white">
+						Created 1 crucible from {okSources.length} source{okSources.length === 1 ? '' : 's'}.
+					</div>
+					{#if failedSources.length > 0}
+						<div class="text-[11px] uppercase tracking-[0.18em] text-rose-300">Skipped sources</div>
+						<div class="max-h-48 space-y-1 overflow-auto pr-1">
+							{#each failedSources as f (f.url)}
+								<div class="border border-rose-900/50 bg-rose-950/20 px-3 py-2 text-[11px]">
+									<div class="truncate text-gray-300">{f.url}</div>
+									<div class="text-rose-300">{f.error_code}: {f.error}</div>
+								</div>
+							{/each}
+						</div>
+					{/if}
+					<div class="flex justify-end gap-2 pt-2">
+						<button
+							type="button"
+							class="border border-[#2d2d2d] bg-[#141414] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400 hover:border-gray-400 hover:text-white"
+							on:click={close}
+						>
+							Done
+						</button>
+						<button
+							type="button"
+							class="border border-cyan-500/60 bg-cyan-950/40 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-100 hover:bg-cyan-900/60"
+							on:click={() => {
+								if (combinedResult) dispatch('created', { id: combinedResult.id });
+								close();
+							}}
+						>
+							Open crucible
+						</button>
+					</div>
+				{/if}
+
+				{#if step === 'done' && !combinedResult}
+					{@const created = createResults.filter((r) => r.ok)}
+					{@const failed = createResults.filter((r) => !r.ok)}
+					<div class="text-sm text-white">
+						Created {created.length} of {createResults.length} crucible{createResults.length === 1
+							? ''
+							: 's'}.
+					</div>
+					{#if failed.length > 0}
+						<div class="text-[11px] uppercase tracking-[0.18em] text-rose-300">Failed</div>
+						<div class="max-h-48 space-y-1 overflow-auto pr-1">
+							{#each failed as f (f.raw)}
+								<div class="border border-rose-900/50 bg-rose-950/20 px-3 py-2 text-[11px]">
+									<div class="truncate text-gray-300">{f.raw}</div>
+									<div class="text-rose-300">{f.errorMsg}</div>
+								</div>
+							{/each}
+						</div>
+					{/if}
+					<div class="flex justify-end gap-2 pt-2">
+						<button
+							type="button"
+							class="border border-[#2d2d2d] bg-[#141414] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400 hover:border-gray-400 hover:text-white"
+							on:click={backToInput}
+						>
+							Add more
+						</button>
+						<button
+							type="button"
+							class="border border-cyan-500/60 bg-cyan-950/40 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-100 hover:bg-cyan-900/60"
+							on:click={close}
+						>
+							Done
+						</button>
 					</div>
 				{/if}
 			</div>

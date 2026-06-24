@@ -134,6 +134,10 @@ def extract_insight(
         routing = get_auxiliary_routing("skill_extraction")
         provider = routing.get("provider", "openai")
         model = routing.get("model_id")
+        # Execute the configured aux fallback chain; the chokepoint skips any
+        # entry that isn't connected+selected. If nothing is callable, the
+        # except-block below skips this extraction cleanly.
+        route = [(provider, model), *(routing.get("fallbacks") or [])]
 
         response = call_ai_sync(
             provider=provider,
@@ -144,6 +148,8 @@ def extract_insight(
             # object closes; combined with tolerant parsing below.
             max_tokens=1024,
             temperature=0.3,
+            fallback=False,
+            route=route,
         )
 
         result = _parse_insight_json(response)

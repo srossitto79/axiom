@@ -15,8 +15,6 @@
 	import SettingsData from '$lib/components/settings/sections/SettingsData.svelte';
 	import SettingsLab from '$lib/components/settings/sections/SettingsLab.svelte';
 	import SettingsTrading from '$lib/components/settings/sections/SettingsTrading.svelte';
-	import SettingsAgents from '$lib/components/settings/sections/SettingsAgents.svelte';
-	import SettingsModels from '$lib/components/settings/sections/SettingsModels.svelte';
 	import SettingsNotifications from '$lib/components/settings/sections/SettingsNotifications.svelte';
 	import SettingsSystem from '$lib/components/settings/sections/SettingsSystem.svelte';
 	import SettingsDangerZone from '$lib/components/settings/sections/SettingsDangerZone.svelte';
@@ -159,10 +157,6 @@
 					<SettingsLab {settings} />
 				{:else if activeArea === 'trading'}
 					<SettingsTrading {settings} />
-				{:else if activeArea === 'agents'}
-					<SettingsAgents {settings} />
-				{:else if activeArea === 'models'}
-					<SettingsModels {settings} />
 				{:else if activeArea === 'notifications'}
 					<SettingsNotifications {settings} />
 				{:else if activeArea === 'system'}

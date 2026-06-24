@@ -1984,6 +1984,9 @@ def run():
     state = _daemon_startup_bookkeeping(install_signal_handlers=True)
     if state is None:
         return
+    # Arm fail-closed spend enforcement in this standalone process too.
+    from forven.model_selection import ensure_enforcement_armed
+    ensure_enforcement_armed()
     try:
         asyncio.run(async_market_loop(state))
     finally:

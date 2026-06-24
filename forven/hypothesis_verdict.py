@@ -55,6 +55,7 @@ def _call_llm(prompt: str) -> str:
         prompt=prompt,
         max_tokens=1024,
         temperature=0.2,
+        fallback=False,
         system=(
             "You are a quantitative research auditor. You will receive (a) a hypothesis, "
             "(b) the outcomes of recent child strategies, (c) a precomputed signals "

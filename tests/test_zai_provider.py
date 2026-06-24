@@ -391,7 +391,7 @@ def test_zai_endpoint_detection_success():
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
         mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_response
+        mock_client.get.return_value = mock_response
         MockClient.return_value = mock_client
 
         result = _detect_zai_endpoint("fake-token")
@@ -409,7 +409,7 @@ def test_zai_endpoint_detection_all_fail():
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
         mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.side_effect = Exception("connection refused")
+        mock_client.get.side_effect = Exception("connection refused")
         MockClient.return_value = mock_client
 
         result = _detect_zai_endpoint("fake-token")

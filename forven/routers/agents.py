@@ -30,11 +30,19 @@ def put_model_policy(body: core.ModelPolicyUpdateBody):
 
 @router.get("/api/agents/provider-health")
 def get_agent_provider_health():
-    """Enabled agents whose configured AI provider has no usable credentials."""
+    """Provider health: static config-drift warnings + runtime call outcomes.
+
+    ``warnings`` — enabled agents whose configured provider has no credentials
+    (static). ``runtime`` — what providers actually did at call time
+    (rate_limit/quota/auth/transient/fallback), so the UI fails loudly when a
+    connected provider degrades or a call falls back.
+    """
     from forven.agents.provider_health import list_agent_provider_warnings
+    from forven.provider_runtime_health import get_provider_health_runtime
 
     warnings = list_agent_provider_warnings()
-    return {"warnings": warnings, "count": len(warnings)}
+    runtime = get_provider_health_runtime()
+    return {"warnings": warnings, "count": len(warnings), "runtime": runtime}
 
 
 @router.post("/api/agents/reconcile-providers")

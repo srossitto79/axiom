@@ -665,7 +665,12 @@ def seed_default_agents() -> dict:
     to operate on even when DISCORD_TOKEN is unset.
     """
     from forven.db import get_db
-    from forven.agents.manager import create_agent, delete_agent, update_agent
+    from forven.agents.manager import (
+        create_agent,
+        delete_agent,
+        ensure_agent_identity_files,
+        update_agent,
+    )
 
     default_agents = _build_default_agents()
 
@@ -684,6 +689,7 @@ def seed_default_agents() -> dict:
 
     created: list[str] = []
     updated: list[str] = []
+    healed: list[str] = []
     for agent_def in default_agents:
         agent_id = agent_def["agent_id"]
         if agent_id not in existing:
@@ -703,10 +709,25 @@ def seed_default_agents() -> dict:
                 updated.append(agent_id)
             except Exception as e:
                 log.warning("Agent update failed for %s: %s", agent_id, e)
+        # Self-heal: (re)create any MISSING per-agent identity files
+        # (SOUL.md/AGENTS.md/ROLE.md) for every built-in agent — including
+        # ones that already existed in the DB (update_agent writes no files).
+        # ensure_agent_identity_files never overwrites non-empty content.
+        try:
+            if ensure_agent_identity_files(
+                agent_id,
+                agent_def["name"],
+                agent_def["role"],
+                agent_def.get("instructions"),
+            ):
+                healed.append(agent_id)
+        except Exception as e:
+            log.warning("Agent identity-file seeding failed for %s: %s", agent_id, e)
 
     return {
         "created": created,
         "updated": updated,
+        "healed": healed,
         "removed_deprecated": removed_deprecated,
         "total": len(default_agents),
     }
@@ -1836,6 +1857,16 @@ class ForvenBot(commands.Bot):
 
         rows = claim_pending_tasks("brain_invoke", limit=None, priority=True)
 
+        if not rows:
+            # Idle: re-seed a brain cycle if the loop has stalled (a timed-out
+            # callback can suppress its retry and leave nothing pending).
+            try:
+                from forven.runtime_worker import ensure_brain_keepalive
+
+                ensure_brain_keepalive()
+            except Exception:
+                log.debug("brain keepalive (bot path) failed", exc_info=True)
+
         for task in rows:
             task = dict(task)
             task_id_raw = task.get("id")
@@ -2531,6 +2562,10 @@ async def start_bot():
 
     try:
         log.info("Bot process forcing subprocess-only/disabled ChromaDB access for stability on this host")
+        # Symmetry with run_bot(): arm fail-closed spend enforcement before any
+        # owns-runtime loop can start.
+        from forven.model_selection import ensure_enforcement_armed
+        ensure_enforcement_armed()
         await _run_all_bots()
     finally:
         _release_bot_lock()
@@ -2592,6 +2627,11 @@ def run_bot():
     try:
         log.info("Bot process forcing subprocess-only/disabled ChromaDB access for stability on this host")
         log.info("Starting Forven gateway (bot + scheduler + task processor)")
+        # Arm fail-closed spend enforcement BEFORE any task/scheduler loop starts,
+        # so a bot-owns-runtime process never spends on an unconnected/unselected
+        # (provider, model) just because the API lifespan hasn't run on this DB.
+        from forven.model_selection import ensure_enforcement_armed
+        ensure_enforcement_armed()
         try:
             asyncio.run(_run_all_bots())
         except discord.errors.LoginFailure as exc:

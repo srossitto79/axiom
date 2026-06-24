@@ -1110,6 +1110,157 @@ def create_hypothesis_from_url_payload(
     return {"ok": True, "hypothesis": hypothesis, "task": task_info, "research_deferred": False}
 
 
+def create_hypothesis_from_urls_payload(
+    *,
+    urls: list[str],
+    title: str | None = None,
+    market_thesis: str | None = None,
+    mechanism: str | None = None,
+    claimed_edge: str | None = None,
+) -> dict[str, Any]:
+    """Combine several source URLs into a SINGLE crucible.
+
+    Fetches each URL, creates one hypothesis, attaches one artifact per
+    successfully-extracted source, and enqueues ONE research task spanning all
+    of them. Per-URL fetch failures are reported in ``sources`` but never abort
+    the others; if NO url extracts, nothing is created (ok=False). Identical
+    URLs in the list are de-duplicated.
+    """
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in urls or []:
+        candidate = (raw or "").strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        cleaned.append(candidate)
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="at least one url is required")
+
+    sources: list[dict[str, Any]] = []  # per-URL outcome echoed to the UI
+    extracted: list[dict[str, Any]] = []  # {url, result} for successful fetches
+    for candidate in cleaned:
+        result = fetch_preview(candidate)
+        if not result.get("ok"):
+            sources.append(
+                {
+                    "url": candidate,
+                    "ok": False,
+                    "source_type": result.get("source_type"),
+                    "error_code": result.get("error_code") or "error",
+                    "error": result.get("error") or "fetch failed",
+                }
+            )
+            continue
+        extracted.append({"url": candidate, "result": result})
+        sources.append(
+            {
+                "url": result.get("url") or candidate,
+                "ok": True,
+                "source_type": result["source_type"],
+                "title": (result.get("title") or "").strip(),
+                "content_bytes": result.get("content_bytes", 0),
+            }
+        )
+
+    if not extracted:
+        return {
+            "ok": False,
+            "error_code": "all_sources_failed",
+            "error": "None of the provided URLs could be extracted.",
+            "sources": sources,
+        }
+
+    primary = extracted[0]["result"]
+    primary_title = (primary.get("title") or "").strip()
+    source_count = len(extracted)
+
+    final_title = (
+        (title or "").strip() or primary_title or f"Operator-seeded from {source_count} sources"
+    )
+    final_thesis = (
+        (market_thesis or "").strip()
+        or f"Evidence pasted from {source_count} sources; thesis to be refined."
+    )
+    final_mechanism = (
+        (mechanism or "").strip() or "Mechanism to be articulated from source content."
+    )
+
+    try:
+        hypothesis = create_hypothesis(
+            title=final_title,
+            market_thesis=final_thesis,
+            mechanism=final_mechanism,
+            why_now=None,
+            lane="benchmarking",
+            source_type="operator_seed",
+            origin_agent_id=None,
+            origin_role="operator",
+            origin_model=None,
+            origin_model_id=None,
+            target_assets=["unspecified"],
+            target_timeframes=["unspecified"],
+            novelty_score=0.0,
+        )
+    except HypothesisPoolFullError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "hypothesis_pool_full",
+                "message": str(exc),
+                "active_count": exc.active_count,
+                "cap": exc.cap,
+            },
+        ) from exc
+
+    edge = (claimed_edge or "").strip() or "Operator-seeded evidence; edge to be characterised."
+    # Attach one artifact per source. A per-artifact write failure (e.g. a
+    # transient DB error) must NOT abort the request and orphan a half-populated
+    # crucible with no research task — degrade that source to a failure in the
+    # echoed ``sources`` and carry on, mirroring the per-URL partial-failure model.
+    source_by_url = {s["url"]: s for s in sources}
+    attached: list[dict[str, Any]] = []
+    for entry in extracted:
+        res = entry["result"]
+        entry_type = res["source_type"]
+        entry_title = (res.get("title") or "").strip()
+        content = res.get("content") or ""
+        try:
+            add_hypothesis_artifact(
+                hypothesis_id=hypothesis["id"],
+                source_type=entry_type,
+                source_title=entry_title or entry_type,
+                source_ref=entry["url"],
+                claimed_edge=edge,
+                implementation_summary="Pending operator or agent review.",
+                cached_content=content if content else None,
+            )
+        except Exception as exc:  # pragma: no cover — defence in depth
+            src = source_by_url.get(res.get("url") or entry["url"])
+            if src is not None:
+                src["ok"] = False
+                src["error_code"] = "artifact_write_failed"
+                src["error"] = str(exc) or "failed to attach source"
+            continue
+        attached.append({"url": entry["url"], "source_type": entry_type})
+
+    task_info = None
+    if attached:
+        task_info = _enqueue_operator_seed_research_multi(
+            hypothesis=hypothesis,
+            sources=attached,
+            source="user",
+        )
+
+    return {
+        "ok": True,
+        "hypothesis": hypothesis,
+        "task": task_info,
+        "sources": sources,
+        "research_deferred": False,
+    }
+
+
 def create_hypothesis_manual_payload(
     *,
     title: str,
@@ -1318,6 +1469,67 @@ def _enqueue_operator_seed_research(
                 "hypothesis_title": hypothesis.get("title"),
                 "source_url": source_url,
                 "source_type": source_type,
+                "research_contract": _research_contract_for(hypothesis),
+            },
+            priority=5,
+            source=source,
+        )
+        return {"task_id": int(task_id) if task_id else None}
+    except Exception as exc:  # pragma: no cover — defence in depth
+        return {"task_id": None, "error": str(exc) or "enqueue failed"}
+
+
+def _enqueue_operator_seed_research_multi(
+    *,
+    hypothesis: dict[str, Any],
+    sources: list[dict[str, Any]],
+    source: str = "user",
+) -> dict[str, Any] | None:
+    """Queue ONE strategy-developer research task spanning several pasted sources.
+
+    Mirrors _enqueue_operator_seed_research but tells the agent to read and
+    synthesise across ALL attached artifacts. source_url/source_type are kept as
+    scalars (the primary source) for back-compat with consumers of the single
+    paste task; the full list rides in input_data["sources"]. Failures here do
+    not roll back the crucible.
+    """
+    display_id = hypothesis.get("display_id") or hypothesis["id"]
+    primary = sources[0] if sources else {"url": "", "source_type": "unknown"}
+    type_summary = (
+        ", ".join(sorted({str(s.get("source_type") or "?") for s in sources})) or "mixed"
+    )
+    title = f"Research operator-seeded hypothesis {display_id}"
+    description = (
+        f"An operator pasted {len(sources)} source URL(s) ({type_summary}) as evidence for "
+        f"ONE hypothesis. Hypothesis {display_id} was created as a stub with placeholder "
+        f"fields. Each source's full extracted content is attached as a SEPARATE artifact — "
+        f"call list_hypothesis_artifacts to read ALL of them.\n\n"
+        f"Your job, in order:\n"
+        f"1. Read the cached content on EVERY attached artifact and synthesise across them.\n"
+        f"2. Call update_hypothesis_fields to populate: title (refine if needed), "
+        f"market_thesis, mechanism, why_now, target_assets, target_timeframes, "
+        f"novelty_score (0-1 vs existing memory).\n"
+        f"3. Call record_data_gap for anything material the sources are missing.\n"
+        f"4. Spawn 1-3 candidate strategies via create_strategy, each tied to "
+        f"hypothesis_id={hypothesis['id']}, lane=benchmarking.\n"
+        f"5. Stop. Do not go outside this hypothesis."
+    )
+    try:
+        from forven.brain import assign_task
+
+        task_id = assign_task(
+            agent_id="strategy-developer",
+            task_type="research",
+            title=title,
+            description=description,
+            input_data={
+                "origin_mode": "operator_url_paste",
+                "hypothesis_id": hypothesis["id"],
+                "hypothesis_display_id": hypothesis.get("display_id"),
+                "hypothesis_title": hypothesis.get("title"),
+                "source_url": primary.get("url"),
+                "source_type": primary.get("source_type"),
+                "sources": sources,
                 "research_contract": _research_contract_for(hypothesis),
             },
             priority=5,

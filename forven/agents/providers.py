@@ -48,6 +48,10 @@ class ProviderResponse:
 class ToolCallProvider:
     """Base class for AI provider adapters."""
 
+    #: Provider id this adapter speaks for; set by get_provider(). Drives the
+    #: spend-safety gate installed on the instance's call/stream.
+    provider_name: str = ""
+
     async def call(
         self,
         model_id: str,
@@ -950,10 +954,150 @@ class DeepSeekProvider(OpenAIProvider):
 
 
 # ---------------------------------------------------------------------------
+# Groq + Gemini (free-tier) — OpenAI-compatible
+# ---------------------------------------------------------------------------
+
+class GroqProvider(OpenAIProvider):
+    """Groq Chat API — OpenAI Chat Completions compatible.
+
+    Default base: ``https://api.groq.com/openai/v1``. Free tier with low
+    rate limits; tool-calling is supported on the larger models (e.g.
+    ``llama-3.3-70b-versatile``).
+    """
+
+    DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
+
+    @staticmethod
+    def _get_base_url() -> str:
+        profile = get_profile("groq") or {}
+        base_url = str(profile.get("base_url") or "").strip()
+        if not base_url:
+            base_url = GroqProvider.DEFAULT_BASE_URL
+        return base_url.rstrip("/")
+
+    @property
+    def ENDPOINT(self) -> str:  # type: ignore[override]
+        return f"{self._get_base_url()}/chat/completions"
+
+
+class GeminiProvider(OpenAIProvider):
+    """Google Gemini — via its OpenAI Chat Completions compatible endpoint.
+
+    Default base: ``https://generativelanguage.googleapis.com/v1beta/openai``.
+    Free tier with daily/per-minute limits; tool-calling is supported on the
+    Gemini 2.x models.
+    """
+
+    DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+    @staticmethod
+    def _get_base_url() -> str:
+        profile = get_profile("gemini") or {}
+        base_url = str(profile.get("base_url") or "").strip()
+        if not base_url:
+            base_url = GeminiProvider.DEFAULT_BASE_URL
+        return base_url.rstrip("/")
+
+    @property
+    def ENDPOINT(self) -> str:  # type: ignore[override]
+        return f"{self._get_base_url()}/chat/completions"
+
+
+# ---------------------------------------------------------------------------
+# Cerebras / Mistral / xAI (Grok) / Together — OpenAI-compatible
+# ---------------------------------------------------------------------------
+
+class _OpenAICompatProvider(OpenAIProvider):
+    """Shared base for OpenAI-compatible providers whose base URL ends at /v1.
+
+    Subclasses set ``PROVIDER`` and ``DEFAULT_BASE_URL``; the chat endpoint is
+    ``{base}/chat/completions`` with an optional per-profile base_url override.
+    """
+
+    PROVIDER = ""
+    DEFAULT_BASE_URL = ""
+
+    @classmethod
+    def _get_base_url(cls) -> str:
+        profile = get_profile(cls.PROVIDER) or {}
+        base_url = str(profile.get("base_url") or "").strip()
+        return (base_url or cls.DEFAULT_BASE_URL).rstrip("/")
+
+    @property
+    def ENDPOINT(self) -> str:  # type: ignore[override]
+        return f"{self._get_base_url()}/chat/completions"
+
+
+class CerebrasProvider(_OpenAICompatProvider):
+    """Cerebras inference — OpenAI-compatible, very fast, free tier."""
+
+    PROVIDER = "cerebras"
+    DEFAULT_BASE_URL = "https://api.cerebras.ai/v1"
+
+
+class MistralProvider(_OpenAICompatProvider):
+    """Mistral La Plateforme — OpenAI-compatible, free experimentation tier."""
+
+    PROVIDER = "mistral"
+    DEFAULT_BASE_URL = "https://api.mistral.ai/v1"
+
+
+class XAIProvider(_OpenAICompatProvider):
+    """xAI (Grok) — OpenAI-compatible chat completions."""
+
+    PROVIDER = "xai"
+    DEFAULT_BASE_URL = "https://api.x.ai/v1"
+
+
+class TogetherProvider(_OpenAICompatProvider):
+    """Together AI — OpenAI-compatible gateway over many open models."""
+
+    PROVIDER = "together"
+    DEFAULT_BASE_URL = "https://api.together.xyz/v1"
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
+def _install_spend_gate(inst: "ToolCallProvider", provider_name: str) -> None:
+    """Shadow inst.call/.stream with closures that run the spend-safety gate
+    BEFORE any HTTP request, making the lowest-level caller a mandatory chokepoint.
+
+    ``assert_callable`` raises ``UnconfiguredRouteError`` for any (provider, model)
+    the operator has not CONNECTED (in-app) AND SELECTED — a no-op until enforcement
+    is enabled in the process. This closes the gap where callers that invoke
+    ``.call``/``.stream`` directly (the deepdive and assistant chat sessions) bypassed
+    the ai.call_ai / runner gates entirely. Shadowing instance attributes (not the
+    class) keeps ``isinstance`` and adapter attributes intact for callers/tests.
+    """
+    real_call = inst.call
+    real_stream = inst.stream
+
+    async def gated_call(model_id, *args, **kwargs):
+        from forven.model_selection import assert_callable
+        assert_callable(provider_name, model_id, slot=f"provider:{provider_name}")
+        return await real_call(model_id, *args, **kwargs)
+
+    async def gated_stream(model_id, *args, **kwargs):
+        from forven.model_selection import assert_callable
+        assert_callable(provider_name, model_id, slot=f"provider:{provider_name}")
+        async for event in real_stream(model_id, *args, **kwargs):
+            yield event
+
+    inst.call = gated_call  # type: ignore[method-assign]
+    inst.stream = gated_stream  # type: ignore[method-assign]
+
+
 def get_provider(name: str) -> ToolCallProvider:
+    """Return the provider adapter for *name* with the spend-safety gate installed."""
+    inst = _construct_provider(name)
+    inst.provider_name = name
+    _install_spend_gate(inst, name)
+    return inst
+
+
+def _construct_provider(name: str) -> ToolCallProvider:
     """Return the appropriate provider adapter for *name*."""
     if name == "minimax":
         return MiniMaxProvider()
@@ -967,5 +1111,23 @@ def get_provider(name: str) -> ToolCallProvider:
         return AnthropicProvider()
     if name == "deepseek":
         return DeepSeekProvider()
-    # Default to OpenAI for all other providers (openai, codex, etc.)
-    return OpenAIProvider()
+    if name == "groq":
+        return GroqProvider()
+    if name == "gemini":
+        return GeminiProvider()
+    if name == "cerebras":
+        return CerebrasProvider()
+    if name == "mistral":
+        return MistralProvider()
+    if name == "xai":
+        return XAIProvider()
+    if name == "together":
+        return TogetherProvider()
+    if name in ("openai", "codex", "openai-codex"):
+        return OpenAIProvider()
+    # Refuse to silently default an unknown provider to OpenAI — that is a
+    # fail-open path that can spend on a provider the operator never chose.
+    raise ValueError(
+        f"Unknown provider {name!r}: refusing to default to OpenAI. "
+        "Configure a supported, connected provider."
+    )

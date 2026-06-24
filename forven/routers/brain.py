@@ -415,8 +415,12 @@ def recall_endpoint(
 
 
 class _AuxiliaryEntry(BaseModel):
-    provider: str
-    model_id: str
+    # provider/model_id are Optional so the frontend can send
+    # ``{"provider": null, "model_id": null}`` (or empty strings) to mean
+    # "remove this slot". A non-empty entry is a normal merge; an empty one is
+    # treated as a DELETE in put_auxiliary_endpoint.
+    provider: str | None = None
+    model_id: str | None = None
     base_url: str | None = None
     api_key: str | None = None
 
@@ -451,9 +455,17 @@ def put_auxiliary_endpoint(body: _AuxiliaryUpdateBody) -> dict[str, Any]:
     current = get_model_routing()
     next_aux = dict(current.get("auxiliary") or {})
     for kind, entry in body.auxiliary.items():
+        provider = (entry.provider or "").strip()
+        model_id = (entry.model_id or "").strip()
+        if not provider or not model_id:
+            # Cleared slot: an entry missing provider OR model_id means
+            # "remove this slot". Pop it so it is not merged back in (and so the
+            # coercion in update_model_routing re-seeds nothing for it).
+            next_aux.pop(kind, None)
+            continue
         next_aux[kind] = {
-            "provider": entry.provider,
-            "model_id": entry.model_id,
+            "provider": provider,
+            "model_id": model_id,
             "base_url": entry.base_url,
             "api_key": entry.api_key,
         }

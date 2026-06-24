@@ -118,7 +118,8 @@ def _call_aux_llm(prompt: str, routing: Mapping[str, Any]) -> str:
 
     provider = routing.get("provider") or ""
     model_id = routing.get("model_id") or ""
-    coro = call_ai(provider=provider, model=model_id, prompt=prompt, fallback=False)
+    route = [(provider, model_id), *(routing.get("fallbacks") or [])]
+    coro = call_ai(provider=provider, model=model_id, prompt=prompt, fallback=False, route=route)
     try:
         loop = asyncio.get_running_loop()  # noqa: F841
     except RuntimeError:

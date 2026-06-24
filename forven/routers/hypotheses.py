@@ -26,6 +26,14 @@ class HypothesisCreateFromUrlRequest(BaseModel):
     claimed_edge: str | None = None
 
 
+class HypothesisCreateFromUrlsRequest(BaseModel):
+    urls: list[str]
+    title: str | None = None
+    market_thesis: str | None = None
+    mechanism: str | None = None
+    claimed_edge: str | None = None
+
+
 class HypothesisCreateManualRequest(BaseModel):
     title: str
     market_thesis: str
@@ -118,6 +126,17 @@ def preview_hypothesis_from_url_endpoint(payload: HypothesisFromUrlPreviewReques
 def create_hypothesis_from_url_endpoint(payload: HypothesisCreateFromUrlRequest):
     return hypotheses_domain.create_hypothesis_from_url_payload(
         url=payload.url,
+        title=payload.title,
+        market_thesis=payload.market_thesis,
+        mechanism=payload.mechanism,
+        claimed_edge=payload.claimed_edge,
+    )
+
+
+@router.post("/api/hypotheses/from_urls")
+def create_hypothesis_from_urls_endpoint(payload: HypothesisCreateFromUrlsRequest):
+    return hypotheses_domain.create_hypothesis_from_urls_payload(
+        urls=payload.urls,
         title=payload.title,
         market_thesis=payload.market_thesis,
         mechanism=payload.mechanism,

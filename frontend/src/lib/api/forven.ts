@@ -13,7 +13,13 @@ export type ForvenProvider =
 	| 'zai'
 	| 'openrouter'
 	| 'anthropic'
-	| 'deepseek';
+	| 'deepseek'
+	| 'groq'
+	| 'gemini'
+	| 'cerebras'
+	| 'mistral'
+	| 'xai'
+	| 'together';
 
 // ============== Forven Classic Compatibility ==============
 
@@ -327,6 +333,14 @@ export interface ForvenAgentModelOptionsResponse {
 export interface ForvenAuthProviderStatus {
 	provider: ForvenProvider;
 	configured: boolean;
+	/**
+	 * Whether the operator has explicitly connected this provider (saved a key or
+	 * completed OAuth) and thereby authorized spend against it. Distinct from
+	 * `configured`, which can be true merely because an env credential exists.
+	 * Backend (`GET /api/auth/providers`) is being updated to emit this; when the
+	 * field is absent, callers fall back to `configured && status === 'active'`.
+	 */
+	connected?: boolean;
 	status:
 		| 'active'
 		| 'expiring_soon'
@@ -398,12 +412,33 @@ export interface ForvenAuthProvidersResponse {
 	auth_file: string;
 }
 
+export interface ForvenModelPolicyFallbackEntry {
+	provider: string;
+	model_id: string;
+}
+
 export interface ForvenModelPolicyResponse {
 	primary_provider: 'minimax' | 'openai' | string;
 	primary_model: string;
 	provider_priority: string[];
 	default_models: Record<string, string>;
-	fallback_chains: Record<string, Array<{ provider: string; model_id: string }>>;
+	fallback_chains: Record<string, ForvenModelPolicyFallbackEntry[]>;
+}
+
+/**
+ * Payload for `PUT /api/model-policy`. All fields optional so individual
+ * routing surfaces (Routing & Fallbacks tab) can patch just what they own.
+ * - `provider_priority`: ordered list of providers tried for the primary/Brain slot.
+ * - `default_models`: per-provider default model id.
+ * - `fallback_chains`: per-slot ordered fallback list; an empty array means
+ *   "no fallback (fail closed)".
+ */
+export interface ForvenModelPolicyUpdatePayload {
+	primary_provider?: string;
+	primary_model?: string;
+	provider_priority?: string[];
+	default_models?: Record<string, string>;
+	fallback_chains?: Record<string, ForvenModelPolicyFallbackEntry[]>;
 }
 
 export interface ForvenAgentTerminalResponse {
@@ -899,6 +934,19 @@ export async function getForvenModelPolicy(): Promise<ForvenModelPolicyResponse>
 	return fetchApi('/forven/model-policy');
 }
 
+/**
+ * Persist the model routing policy. Sends `provider_priority`, `default_models`
+ * and `fallback_chains` (plus optional primary fields) to `PUT /api/model-policy`.
+ */
+export async function updateForvenModelPolicy(
+	payload: ForvenModelPolicyUpdatePayload
+): Promise<ForvenModelPolicyResponse> {
+	return fetchApi('/forven/model-policy', {
+		method: 'PUT',
+		body: JSON.stringify(payload),
+	});
+}
+
 export async function updateForvenAgentModel(
 	agentId: string,
 	payload: { model: ForvenProvider; model_id?: string }
@@ -1090,8 +1138,52 @@ export interface AgentProviderWarning {
 	fallback: string | null;
 }
 
-export async function getAgentProviderHealth(): Promise<{ warnings: AgentProviderWarning[]; count: number }> {
+/**
+ * Runtime health for a single provider as observed by the backend during live
+ * agent/Brain calls. Backend (`GET /api/agents/provider-health`) is being
+ * updated to emit a `runtime` array of these alongside the existing
+ * `warnings`. Treat every field except `provider`/`state` as optional and
+ * degrade gracefully — the page must never crash if the shape is incomplete.
+ */
+export interface ProviderRuntimeHealth {
+	provider: string;
+	state: 'ok' | 'degraded' | 'down' | string;
+	kind?: 'rate_limit' | 'quota' | 'auth' | 'transient' | 'fallback' | string;
+	message?: string | null;
+	// Backend emits these as epoch SECONDS (numbers), though some shapes send an
+	// ISO string — accept both (and null) so consumers can normalize.
+	since?: string | number | null;
+	last_event_at?: string | number | null;
+	last_ok_at?: string | number | null;
+	fallback_to?: string | null;
+}
+
+export interface ProviderHealthResponse {
+	warnings: AgentProviderWarning[];
+	runtime: ProviderRuntimeHealth[];
+	count?: number;
+}
+
+export async function getAgentProviderHealth(): Promise<{
+	warnings: AgentProviderWarning[];
+	runtime?: ProviderRuntimeHealth[];
+	count: number;
+}> {
 	return fetchApi('/agents/provider-health');
+}
+
+/**
+ * Typed wrapper over `GET /api/agents/provider-health` that always returns the
+ * `{warnings, runtime}` shape the Health tab and ConnectionHealthBanner depend
+ * on, defaulting both arrays so consumers can map over them unconditionally.
+ */
+export async function getProviderHealth(): Promise<ProviderHealthResponse> {
+	const res = await fetchApi<Partial<ProviderHealthResponse>>('/agents/provider-health');
+	return {
+		warnings: Array.isArray(res?.warnings) ? res.warnings : [],
+		runtime: Array.isArray(res?.runtime) ? res.runtime : [],
+		count: typeof res?.count === 'number' ? res.count : undefined,
+	};
 }
 
 export async function reconcileAgentProviders(): Promise<{

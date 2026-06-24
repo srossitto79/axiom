@@ -400,7 +400,25 @@ def build_agent_context(
     # Agent's own role definition
     parts.append(f"# YOUR ROLE\n{role_md}")
 
-    # Minimal identity context
+    # Per-agent SOUL — who this sub-agent is (seeded from the shared template,
+    # personalized per agent). Falls back to the global SOUL.md for agents that
+    # predate per-agent seeding.
+    soul = read_workspace(f"agents/{agent_id}/SOUL.md", optional=True)
+    if not (soul and soul.strip()):
+        soul = read_workspace("SOUL.md", optional=True)
+    if soul and soul.strip():
+        parts.append(f"# SOUL\n{soul}")
+
+    # Per-agent AGENTS — the agent's workspace operating guide (per-agent copy,
+    # falling back to the global file for backward-compat).
+    agents_md = read_workspace(f"agents/{agent_id}/AGENTS.md", optional=True)
+    if not (agents_md and agents_md.strip()):
+        agents_md = read_workspace("AGENTS.md", optional=True)
+    if agents_md and agents_md.strip():
+        parts.append(f"# WORKSPACE GUIDE\n{agents_md}")
+
+    # Minimal identity context — the single GLOBAL IDENTITY.md (mission/risk)
+    # shared by every agent.
     identity = read_workspace("IDENTITY.md", optional=True)
     if identity:
         parts.append(f"# FORVEN — IDENTITY & RULES\n{identity}")

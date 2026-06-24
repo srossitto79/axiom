@@ -673,8 +673,11 @@ def check_data_freshness() -> ComponentStatus:
         )
     except Exception as exc:
         log.warning("Data freshness check failed: %s", exc)
+        # A crash inside the watchdog must NOT assert health — surface the
+        # broken monitor as AMBER (like every other collector returns on
+        # internal failure) so it is itself visible.
         return ComponentStatus(
-            name="data_freshness", state=State.GREEN,
+            name="data_freshness", state=State.AMBER,
             message=f"Check failed: {exc}", component_type="data",
         )
 
@@ -1207,6 +1210,46 @@ def check_sqlite_health() -> DataCheck:
 PIPELINE_FROZEN_THRESHOLD_MINUTES = 60
 
 
+def check_ai_providers() -> ComponentStatus:
+    """Surface degraded/exhausted AI providers so they reach the critical banner.
+
+    Reads the runtime provider-health store (what providers actually did at call
+    time). A connected provider that is auth-invalid or quota/spend-cap exhausted
+    is RED (operator must act); a rate-limited/transient/fallback provider is
+    AMBER. This is the only AI/provider signal in the health-monitor loop, so it
+    is what lets a provider outage light the prominent CriticalAlertsBanner.
+    """
+    try:
+        from forven.provider_runtime_health import get_provider_health_runtime
+
+        runtime = get_provider_health_runtime()
+    except Exception as exc:
+        # A crash in the provider-health read must not assert health — this is the
+        # only AI-provider signal feeding the critical banner.
+        return ComponentStatus(name="ai_providers", state=State.AMBER, message=f"Check failed: {exc}")
+
+    down = [e for e in runtime if e.get("state") == "down"]
+    degraded = [e for e in runtime if e.get("state") == "degraded"]
+    if down:
+        names = ", ".join(f"{e.get('provider')} ({e.get('kind')})" for e in down)
+        return ComponentStatus(
+            name="ai_providers",
+            state=State.RED,
+            message=(
+                f"AI provider(s) unavailable: {names}. Reconnect/fix the provider "
+                "or select another connected model in the Agents page."
+            ),
+        )
+    if degraded:
+        names = ", ".join(f"{e.get('provider')} ({e.get('kind')})" for e in degraded)
+        return ComponentStatus(
+            name="ai_providers",
+            state=State.AMBER,
+            message=f"AI provider(s) degraded: {names}.",
+        )
+    return ComponentStatus(name="ai_providers", state=State.GREEN, message="AI providers healthy")
+
+
 def check_pipeline_throughput() -> ComponentStatus:
     """Detect frozen pipeline: worker alive + jobs queued + no completions.
 
@@ -1281,9 +1324,12 @@ def check_pipeline_throughput() -> ComponentStatus:
             )
     except Exception as exc:
         log.warning("Pipeline throughput check failed: %s", exc)
+        # A crash inside the watchdog must NOT assert health — surface the
+        # broken monitor as AMBER (like every other collector returns on
+        # internal failure) so it is itself visible.
         return ComponentStatus(
             name="pipeline_throughput",
-            state=State.GREEN,
+            state=State.AMBER,
             message=f"Check failed: {exc}",
         )
 
@@ -1334,12 +1380,16 @@ class HealthMonitor:
         log.info("Health monitor stopped")
 
     async def _poll_loop(self) -> None:
-        """Main heartbeat polling loop."""
+        """Main heartbeat polling loop.
+
+        Read-only observability (the status checks AND alert dispatch) runs in
+        EVERY mode — a down/quota-exhausted AI provider must still raise the
+        critical banner / Discord alert while the operator is hands-on in manual
+        mode. ONLY the autonomous auto-recovery (which takes corrective action)
+        is gated behind ``autonomous_runtime_allowed()``.
+        """
         while self._running:
             try:
-                if not autonomous_runtime_allowed():
-                    await asyncio.sleep(self.poll_interval)
-                    continue
                 old_statuses = {s.name: s for s in self.state.get_all_statuses()}
                 new_statuses: dict[str, ComponentStatus] = {}
 
@@ -1351,6 +1401,7 @@ class HealthMonitor:
                     check_data_freshness,
                     check_lab_worker,
                     check_pipeline_throughput,
+                    check_ai_providers,
                 ):
                     try:
                         result = check_fn()
@@ -1373,14 +1424,17 @@ class HealthMonitor:
                 except Exception as exc:
                     log.warning("Bot health check failed: %s", exc)
 
-                # Dispatch alerts based on state changes
+                # Dispatch alerts based on state changes (runs in every mode).
                 _dispatch_alerts(self.state, old_statuses, new_statuses)
 
-                # Auto-recovery for RED components
-                for name, status in new_statuses.items():
-                    old = old_statuses.get(name)
-                    if status.state == State.RED and (old is None or old.state != State.RED):
-                        await _attempt_recovery(self.state, name, status)
+                # Auto-recovery for RED components — this TAKES ACTION, so it is
+                # gated on autonomous mode. In manual mode we still observed and
+                # alerted above; we just don't auto-act.
+                if autonomous_runtime_allowed():
+                    for name, status in new_statuses.items():
+                        old = old_statuses.get(name)
+                        if status.state == State.RED and (old is None or old.state != State.RED):
+                            await _attempt_recovery(self.state, name, status)
 
             except Exception as exc:
                 log.error("Health monitor poll loop error: %s", exc, exc_info=True)
@@ -1388,15 +1442,17 @@ class HealthMonitor:
             await asyncio.sleep(self.poll_interval)
 
     async def _data_check_loop(self) -> None:
-        """Slower data integrity check loop."""
+        """Slower data integrity check loop.
+
+        These are READ-ONLY observability checks that only record alerts (no
+        corrective action), so they run in every mode — a broken pipeline must
+        still alert the hands-on operator in manual mode.
+        """
         # Initial delay to let services start
         await asyncio.sleep(60)
 
         while self._running:
             try:
-                if not autonomous_runtime_allowed():
-                    await asyncio.sleep(self.data_check_interval)
-                    continue
                 for check_fn in (
                     check_candle_freshness,
                     check_pipeline_consistency,

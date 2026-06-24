@@ -44,6 +44,7 @@ def _default_call_llm(prompt: str) -> str:
         max_tokens=1024,
         temperature=0.2,
         system=_SYSTEM,
+        fallback=False,
     )
 
 

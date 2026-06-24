@@ -236,10 +236,13 @@ def _call_aux_llm(prompt: str, routing: dict) -> str:
 
     provider = routing.get("provider") or ""
     model_id = routing.get("model_id") or ""
+    # Execute the configured aux fallback chain (provider+model, then each
+    # operator-configured fallback). The chokepoint skips any unselected entry.
+    route = [(provider, model_id), *(routing.get("fallbacks") or [])]
 
     async def _invoke() -> str:
         return await asyncio.wait_for(
-            call_ai(provider=provider, model=model_id, prompt=prompt, fallback=False),
+            call_ai(provider=provider, model=model_id, prompt=prompt, fallback=False, route=route),
             timeout=LATENCY_BUDGET_SECONDS,
         )
 

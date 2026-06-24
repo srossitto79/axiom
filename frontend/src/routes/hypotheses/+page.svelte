@@ -248,6 +248,12 @@
 		void goto(`/hypotheses/${event.detail.id}`);
 	}
 
+	function handleCreatedBulk(event: CustomEvent<{ ids: string[] }>): void {
+		const n = event.detail.ids.length;
+		setBanner('success', `Created ${n} crucible${n === 1 ? '' : 's'} from URLs.`);
+		void refreshAll();
+	}
+
 	function handleManualCreated(event: CustomEvent<{ id: string }>): void {
 		setBanner('success', 'Crucible created.');
 		void goto(`/hypotheses/${event.detail.id}`);
@@ -729,6 +735,7 @@
 	open={urlIngestOpen}
 	on:close={() => (urlIngestOpen = false)}
 	on:created={handleCreated}
+	on:createdBulk={handleCreatedBulk}
 />
 
 <ManualIngestDialog

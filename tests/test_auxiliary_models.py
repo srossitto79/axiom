@@ -180,25 +180,85 @@ def test_unsupported_provider_in_auxiliary_is_rejected(forven_db):
 # silently kill auxiliary features when the operator only has keys for other
 # providers (live incident: every recall re-rank/synthesis and smart-approval
 # classification failed with "No auth profile for openrouter").
+#
+# Spend-safety contract (UPDATED): a divert is allowed ONLY to a provider the
+# operator CONNECTED in-app AND SELECTED (its default model callable). A
+# provider that is merely env-credentialed (or unselected) is NOT a valid
+# substitute — diverting to it is the "silent default switch" the invariant
+# forbids. When no candidate qualifies the original entry is returned unchanged
+# so the call fails closed. A divert is LOUD: WARNING log + runtime-health
+# ``fallback`` event.
 # --------------------------------------------------------------------------- #
 
-def test_aux_routing_missing_openrouter_creds_degrades_to_credentialed_provider(forven_db, monkeypatch):
-    """All five aux kinds default to openrouter; with only openai+minimax
-    credentialed (the live box), routing must resolve to openai (first
-    credentialed provider in priority order) with its default model."""
-    credentialed = {"openai", "minimax"}
+def _connect_and_select(monkeypatch, providers: set[str]) -> None:
+    """Mark ``providers`` connected in-app AND make their tokens resolve so the
+    model_selection callable gate (connected ∩ selected) admits each provider's
+    default model."""
+    from forven import model_selection
+
+    for p in providers:
+        model_selection.mark_provider_connected(p)
     monkeypatch.setattr(
-        model_routing, "_provider_has_credentials", lambda p: p in credentialed
+        model_selection,
+        "_provider_has_token",
+        lambda p: p in providers,
     )
+
+
+def test_aux_routing_diverts_only_to_connected_and_callable_provider(forven_db, monkeypatch):
+    """All five aux kinds default to openrouter. With openrouter uncredentialed
+    but openai CONNECTED + SELECTED (its default model gpt-5.2 is a routing
+    selection), routing must divert to openai with its default model."""
+    # openrouter (the routed provider) has no usable credentials.
+    monkeypatch.setattr(model_routing, "_provider_has_credentials", lambda p: False)
+    _connect_and_select(monkeypatch, {"openai"})
+
     for kind in AUXILIARY_TASK_KINDS:
         routing = get_auxiliary_routing(kind)
         assert routing["provider"] == "openai", f"{kind} resolved to {routing['provider']!r}"
         assert routing["model_id"] == get_model_routing()["default_models"]["openai"]
 
 
+def test_aux_routing_does_not_divert_to_env_only_unselected_provider(forven_db, monkeypatch):
+    """openai is env-credentialed but NOT connected in-app: it is NOT a valid
+    substitute. The original (openrouter) entry is returned unchanged so the
+    downstream call fails closed instead of silently spending on an unselected
+    provider."""
+    # Both providers report env credentials, but NEITHER is connected in-app
+    # and no model_selection token resolves -> not callable.
+    monkeypatch.setattr(
+        model_routing, "_provider_has_credentials", lambda p: p in {"openai", "minimax"}
+    )
+    routing = get_auxiliary_routing("recall")
+    assert routing["provider"] == "openrouter"
+    assert routing["model_id"] == "openai/gpt-4o-mini"
+
+
+def test_aux_routing_divert_emits_loud_runtime_health_event(forven_db, monkeypatch):
+    """A divert must be operator-visible: a runtime-health ``fallback`` event is
+    recorded against the original provider, naming the substitute."""
+    from forven import provider_runtime_health as prh
+
+    monkeypatch.setattr(model_routing, "_provider_has_credentials", lambda p: False)
+    _connect_and_select(monkeypatch, {"openai"})
+    prh.clear_provider_health()
+
+    routing = get_auxiliary_routing("recall")
+    assert routing["provider"] == "openai"
+
+    health = {e["provider"]: e for e in prh.get_provider_health_runtime()}
+    assert "openrouter" in health, "expected a runtime-health event for the diverted-from provider"
+    event = health["openrouter"]
+    assert event["kind"] == "fallback"
+    assert event["state"] == "degraded"
+    assert event["fallback_to"] == "openai"
+    assert "openrouter" in event["message"] and "openai" in event["message"]
+
+
 def test_aux_routing_with_mocked_auth_profiles_resolves_to_available_provider(forven_db, monkeypatch):
     """Exercise the REAL credential probe against mocked auth profiles
-    (forven.auth.store.get_token) rather than a stubbed predicate."""
+    (forven.auth.store.get_token) rather than a stubbed predicate. Divert still
+    requires the substitute to be connected in-app AND callable."""
     monkeypatch.setattr(
         model_routing, "_provider_has_credentials", _REAL_PROVIDER_HAS_CREDENTIALS
     )
@@ -209,6 +269,10 @@ def test_aux_routing_with_mocked_auth_profiles_resolves_to_available_provider(fo
         raise ValueError(f"No auth profile for {provider}. Run: forven auth login {provider}")
 
     monkeypatch.setattr("forven.auth.store.get_token", _get_token)
+    # Connect openai in-app so it is a valid (connected ∩ selected) substitute.
+    from forven import model_selection
+
+    model_selection.mark_provider_connected("openai")
 
     routing = get_auxiliary_routing("recall")
     assert routing["provider"] == "openai"

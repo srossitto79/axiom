@@ -252,7 +252,7 @@ def _parse_int_query(value: str | None, default: int = 0) -> int:
         return default
 
 
-_SUPPORTED_AUTH_PROVIDERS: list[str] = ["openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek"]
+_SUPPORTED_AUTH_PROVIDERS: list[str] = ["openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek", "groq", "gemini", "cerebras", "mistral", "xai", "together"]
 _AUTH_PROVIDER_ENV_VARS = {
     "openai": "OPENAI_API_KEY",
     "minimax": "MINIMAX_API_KEY",
@@ -261,6 +261,12 @@ _AUTH_PROVIDER_ENV_VARS = {
     "openrouter": "OPENROUTER_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "cerebras": "CEREBRAS_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "xai": "XAI_API_KEY",
+    "together": "TOGETHER_API_KEY",
 }
 _AUTH_OAUTH_SESSIONS: dict[str, dict[str, dict[str, object]]] = {}
 _AUTH_OAUTH_CALLBACKS: dict[str, dict[str, str]] = {}
@@ -285,6 +291,21 @@ _MODEL_DISCOVERY_ALT_ENDPOINTS = {
         "https://api.z.ai/api/paas/v4/models",
         "https://open.bigmodel.cn/api/paas/v4/models",
     ],
+    "groq": ["https://api.groq.com/openai/v1/models"],
+    "gemini": ["https://generativelanguage.googleapis.com/v1beta/openai/models"],
+    # Anthropic paginates /v1/models (default 20); ask for the full list so new
+    # releases (e.g. newer Opus/Sonnet) surface without a catalog edit.
+    "anthropic": ["https://api.anthropic.com/v1/models?limit=1000"],
+    # DeepSeek is OpenAI-compatible; try the /v1 path first, then the bare path.
+    "deepseek": [
+        "https://api.deepseek.com/v1/models",
+        "https://api.deepseek.com/models",
+    ],
+    "cerebras": ["https://api.cerebras.ai/v1/models"],
+    "mistral": ["https://api.mistral.ai/v1/models"],
+    "xai": ["https://api.x.ai/v1/models"],
+    # Together is a large gateway; its models are curated in the catalog rather
+    # than discovered, to avoid flooding the picker.
 }
 _MODEL_DISCOVERY_HEADERS = {
     "openai": {
@@ -297,6 +318,42 @@ _MODEL_DISCOVERY_HEADERS = {
     "zai": {
         "Authorization": "Bearer {token}",
     },
+    "groq": {
+        "Authorization": "Bearer {token}",
+    },
+    "gemini": {
+        "Authorization": "Bearer {token}",
+    },
+    "anthropic": {
+        "x-api-key": "{token}",
+        "anthropic-version": "2023-06-01",
+    },
+    "deepseek": {
+        "Authorization": "Bearer {token}",
+    },
+    "cerebras": {
+        "Authorization": "Bearer {token}",
+    },
+    "mistral": {
+        "Authorization": "Bearer {token}",
+    },
+    "xai": {
+        "Authorization": "Bearer {token}",
+    },
+}
+
+# Endpoints used by the connection "Test" to verify a key is actually valid
+# (not just present). Defaults to the model-discovery endpoints/headers above;
+# overrides here cover providers whose /models route is unauthenticated and so
+# can't distinguish a good key from a bad one (e.g. OpenRouter).
+_AUTH_TEST_ENDPOINT_OVERRIDES = {
+    "openrouter": ["https://openrouter.ai/api/v1/key"],
+    # Together isn't model-discovered; verify the key against its /models route.
+    "together": ["https://api.together.xyz/v1/models"],
+}
+_AUTH_TEST_HEADER_OVERRIDES = {
+    "openrouter": {"Authorization": "Bearer {token}"},
+    "together": {"Authorization": "Bearer {token}"},
 }
 _MODEL_PROVIDER_DISPLAY_NAMES = {
     "openai": "OpenAI",
@@ -306,6 +363,12 @@ _MODEL_PROVIDER_DISPLAY_NAMES = {
     "openrouter": "OpenRouter",
     "anthropic": "Anthropic",
     "deepseek": "DeepSeek",
+    "groq": "Groq",
+    "gemini": "Google Gemini",
+    "cerebras": "Cerebras",
+    "mistral": "Mistral",
+    "xai": "xAI (Grok)",
+    "together": "Together AI",
 }
 _LOCAL_PROVIDER_DEFAULT_BASE_URLS = {
     "lmstudio": "http://127.0.0.1:1234",
@@ -362,11 +425,53 @@ _AGENT_MODEL_CATALOG = [
     {"provider": "anthropic", "model_id": "claude-3-5-haiku-20241022", "label": "Anthropic Claude 3.5 Haiku"},
     {"provider": "deepseek", "model_id": "deepseek-chat", "label": "DeepSeek Chat"},
     {"provider": "deepseek", "model_id": "deepseek-reasoner", "label": "DeepSeek Reasoner"},
+    {"provider": "groq", "model_id": "llama-3.3-70b-versatile", "label": "Groq Llama 3.3 70B Versatile"},
+    {"provider": "groq", "model_id": "llama-3.1-8b-instant", "label": "Groq Llama 3.1 8B Instant"},
+    {"provider": "groq", "model_id": "openai/gpt-oss-120b", "label": "Groq GPT-OSS 120B"},
+    {"provider": "groq", "model_id": "openai/gpt-oss-20b", "label": "Groq GPT-OSS 20B"},
+    {"provider": "groq", "model_id": "moonshotai/kimi-k2-instruct", "label": "Groq Kimi K2 Instruct"},
+    {"provider": "groq", "model_id": "qwen/qwen3-32b", "label": "Groq Qwen3 32B"},
+    {"provider": "gemini", "model_id": "gemini-2.5-pro", "label": "Google Gemini 2.5 Pro"},
+    {"provider": "gemini", "model_id": "gemini-2.5-flash", "label": "Google Gemini 2.5 Flash"},
+    {"provider": "gemini", "model_id": "gemini-2.5-flash-lite", "label": "Google Gemini 2.5 Flash Lite"},
+    {"provider": "gemini", "model_id": "gemini-2.0-flash", "label": "Google Gemini 2.0 Flash"},
+    {"provider": "gemini", "model_id": "gemini-1.5-flash", "label": "Google Gemini 1.5 Flash"},
+    # Cerebras / Mistral / xAI are also live-discovered; these seed sensible
+    # defaults + a fallback when discovery is unavailable.
+    {"provider": "cerebras", "model_id": "llama-3.3-70b", "label": "Cerebras Llama 3.3 70B"},
+    {"provider": "cerebras", "model_id": "llama3.1-8b", "label": "Cerebras Llama 3.1 8B"},
+    {"provider": "cerebras", "model_id": "qwen-3-32b", "label": "Cerebras Qwen 3 32B"},
+    {"provider": "cerebras", "model_id": "gpt-oss-120b", "label": "Cerebras GPT-OSS 120B"},
+    {"provider": "mistral", "model_id": "mistral-large-latest", "label": "Mistral Large"},
+    {"provider": "mistral", "model_id": "mistral-medium-latest", "label": "Mistral Medium"},
+    {"provider": "mistral", "model_id": "mistral-small-latest", "label": "Mistral Small"},
+    {"provider": "mistral", "model_id": "magistral-small-latest", "label": "Mistral Magistral Small"},
+    {"provider": "mistral", "model_id": "codestral-latest", "label": "Mistral Codestral"},
+    {"provider": "mistral", "model_id": "open-mistral-nemo", "label": "Mistral Nemo"},
+    {"provider": "xai", "model_id": "grok-4", "label": "xAI Grok 4"},
+    {"provider": "xai", "model_id": "grok-3", "label": "xAI Grok 3"},
+    {"provider": "xai", "model_id": "grok-3-mini", "label": "xAI Grok 3 Mini"},
+    {"provider": "xai", "model_id": "grok-code-fast-1", "label": "xAI Grok Code Fast"},
+    # Together is a broad gateway; a curated set of popular tool-capable models.
+    {"provider": "together", "model_id": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "label": "Together Llama 3.3 70B Turbo"},
+    {"provider": "together", "model_id": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo", "label": "Together Llama 3.1 8B Turbo"},
+    {"provider": "together", "model_id": "Qwen/Qwen2.5-72B-Instruct-Turbo", "label": "Together Qwen 2.5 72B Turbo"},
+    {"provider": "together", "model_id": "deepseek-ai/DeepSeek-V3", "label": "Together DeepSeek V3"},
+    {"provider": "together", "model_id": "mistralai/Mixtral-8x7B-Instruct-v0.1", "label": "Together Mixtral 8x7B"},
+    # OpenRouter: free tool-capable models are auto-discovered; these curated
+    # entries are reliable fallbacks (always selectable even if discovery fails).
+    {"provider": "openrouter", "model_id": "openrouter/free", "label": "OpenRouter Auto (free, tool-capable router)"},
+    {"provider": "openrouter", "model_id": "nvidia/nemotron-3-ultra-550b-a55b", "label": "OpenRouter Nemotron 3 Ultra 550B (paid)"},
+    {"provider": "openrouter", "model_id": "openai/gpt-4o-mini", "label": "OpenRouter GPT-4o Mini (paid)"},
 ]
 
 
 def _normalize_model_id(value: object) -> str:
     normalized = str(value or "").strip()
+    # Gemini's OpenAI-compatible /models endpoint returns ids like
+    # "models/gemini-2.5-flash"; the chat endpoint wants the bare id.
+    if normalized.startswith("models/"):
+        normalized = normalized[len("models/"):]
     return normalized
 
 
@@ -386,29 +491,31 @@ def _coerce_discovered_model_record(model_id: str, provider: str, label: str | N
 
 
 def _looks_like_openai_discovery_model(model: str) -> bool:
-    lowered = model.lower()
-    if lowered.startswith("codex-"):
+    """Identify OpenAI CHAT/reasoning models from the /v1/models list.
+
+    Exclusion-first so genuinely new chat models auto-appear without a code
+    change: drop the non-chat modalities OpenAI also serves (embeddings, audio,
+    image, moderation, etc.), then accept the chat/reasoning families — gpt-*,
+    chatgpt-*, codex-*, and the WHOLE o-series (o1, o3, o4-mini, future o5...),
+    not just o1.
+    """
+    lowered = model.lower().strip()
+    if not lowered:
+        return False
+    if any(
+        tag in lowered
+        for tag in (
+            "embedding", "whisper", "tts", "audio", "realtime", "transcribe",
+            "dall-e", "image", "moderation", "search", "similarity",
+        )
+    ):
+        return False
+    if lowered.startswith(("gpt-", "chatgpt-", "codex-")):
         return True
-    if lowered.startswith("gpt-") or lowered.startswith("o1"):
+    # o-series: 'o' followed by a digit (o1, o3, o4-mini, o5, ...).
+    if len(lowered) >= 2 and lowered[0] == "o" and lowered[1].isdigit():
         return True
-    return lowered in {
-        "gpt-3.5-turbo",
-        "gpt-3.5-turbo-0125",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4.1-nano",
-        "gpt-4-turbo",
-        "gpt-4-0125-preview",
-        "gpt-4-vision-preview",
-        "gpt-4o",
-        "gpt-4o-mini",
-        "gpt-5",
-        "gpt-5.2",
-        "gpt-5.2-mini",
-        "o1",
-        "o1-mini",
-        "o1-preview",
-    }
+    return False
 
 
 def _looks_like_minimax_discovery_model(model: str) -> bool:
@@ -429,6 +536,68 @@ def _looks_like_zai_discovery_model(model: str) -> bool:
     return lowered.startswith("glm-")
 
 
+def _looks_like_anthropic_discovery_model(model: str) -> bool:
+    lowered = model.lower().strip()
+    return lowered.startswith("claude-") or "claude" in lowered
+
+
+def _looks_like_deepseek_discovery_model(model: str) -> bool:
+    lowered = model.lower().strip()
+    return lowered.startswith("deepseek")
+
+
+def _looks_like_cerebras_discovery_model(model: str) -> bool:
+    # Cerebras serves only chat models via /v1/models; accept any non-empty id.
+    return bool(str(model or "").strip())
+
+
+def _looks_like_mistral_discovery_model(model: str) -> bool:
+    lowered = model.lower().strip()
+    if not lowered:
+        return False
+    # Drop non-chat models Mistral also lists (embeddings, moderation, OCR).
+    if any(tag in lowered for tag in ("embed", "moderation", "ocr")):
+        return False
+    return True
+
+
+def _looks_like_xai_discovery_model(model: str) -> bool:
+    lowered = model.lower().strip()
+    # Keep generative grok chat models; drop image-generation variants.
+    return lowered.startswith("grok") and "image" not in lowered
+
+
+def _looks_like_groq_discovery_model(model: str) -> bool:
+    raw = str(model or "").strip()
+    if not raw:
+        return False
+    # Groq's /models payload carries both a callable id (lowercase slug, e.g.
+    # "llama-3.3-70b-versatile") and a human display name ("Llama 3.3 70B").
+    # Only the id is callable, so reject anything with spaces or uppercase.
+    if any(ch.isspace() or ch.isupper() for ch in raw):
+        return False
+    # Exclude non-chat models (speech-to-text, text-to-speech, moderation).
+    if any(tag in raw for tag in ("whisper", "tts", "guard", "orpheus", "safety")):
+        return False
+    return True
+
+
+def _looks_like_gemini_discovery_model(model: str) -> bool:
+    lowered = model.lower().strip()  # "models/" prefix already stripped upstream
+    if not lowered.startswith("gemini-"):
+        return False
+    # Gemini's compat /models also lists non-text modalities; keep chat models.
+    if any(
+        tag in lowered
+        for tag in (
+            "embedding", "image", "tts", "aqa", "computer-use",
+            "native-audio", "live", "robotics",
+        )
+    ):
+        return False
+    return True
+
+
 def _discovery_model_should_belong(provider: str, model_id: str) -> bool:
     if not model_id:
         return False
@@ -440,6 +609,20 @@ def _discovery_model_should_belong(provider: str, model_id: str) -> bool:
         return _looks_like_lmstudio_discovery_model(model_id)
     if provider == "zai":
         return _looks_like_zai_discovery_model(model_id)
+    if provider == "anthropic":
+        return _looks_like_anthropic_discovery_model(model_id)
+    if provider == "deepseek":
+        return _looks_like_deepseek_discovery_model(model_id)
+    if provider == "groq":
+        return _looks_like_groq_discovery_model(model_id)
+    if provider == "gemini":
+        return _looks_like_gemini_discovery_model(model_id)
+    if provider == "cerebras":
+        return _looks_like_cerebras_discovery_model(model_id)
+    if provider == "mistral":
+        return _looks_like_mistral_discovery_model(model_id)
+    if provider == "xai":
+        return _looks_like_xai_discovery_model(model_id)
     return False
 
 
@@ -530,28 +713,25 @@ def _detect_zai_endpoint(token: str, preferred_model: str = "glm-5.1") -> dict:
     for candidate in _ZAI_CANDIDATE_ENDPOINTS:
         base_url = candidate["base_url"]
         endpoint_id = candidate["id"]
-        url = f"{base_url}/chat/completions"
+        # Non-inference probe: GET /models validates the endpoint + key WITHOUT
+        # issuing a paid completion against a not-yet-connected (provider, model),
+        # matching the other discovery/verification probes.
+        url = f"{base_url}/models"
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
-        body = {
-            "model": preferred_model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 5,
-            "stream": False,
-        }
         try:
             with httpx.Client(timeout=15) as client:
-                resp = client.post(url, json=body, headers=headers)
+                resp = client.get(url, headers=headers)
                 resp.raise_for_status()
-                data = resp.json()
+                resp.json()
             return {
                 "ok": True,
                 "base_url": base_url,
                 "endpoint_id": endpoint_id,
                 "model_id": preferred_model,
-                "note": f"Detected {endpoint_id} endpoint with {preferred_model}",
+                "note": f"Detected {endpoint_id} endpoint",
             }
         except Exception as exc:
             log.debug("zai endpoint probe failed for %s: %s", endpoint_id, exc)
@@ -632,6 +812,57 @@ def _discover_provider_models(provider: str, force_refresh: bool = False) -> tup
             "models": merged,
             "error": discovery_error,
             "source": source,
+        }
+        return merged, discovery_error
+
+    if provider == "openrouter":
+        # OpenRouter is a gateway over 400+ models — listing them all would
+        # flood the picker. Surface only the FREE, tool-capable models (the
+        # useful set for Forven's agent loop), auto-updating as the free roster
+        # rotates. Curated paid fallbacks live in the catalog and merge in.
+        try:
+            token = get_token("openrouter")
+        except Exception:
+            token = ""
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        try:
+            with httpx.Client(timeout=20) as client:
+                response = client.get("https://openrouter.ai/api/v1/models", headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+        except Exception as exc:
+            _AGENT_MODEL_LIST_CACHE[provider] = {
+                "fetched_at": now, "models": fallback, "error": str(exc), "source": source,
+            }
+            return fallback, str(exc)
+
+        def _is_zero_price(value: object) -> bool:
+            try:
+                return float(value or 0) == 0.0
+            except (TypeError, ValueError):
+                return False
+
+        discovered_records: list[dict] = []
+        for model in (payload.get("data") or []):
+            model_id = str(model.get("id") or "").strip()
+            if not model_id:
+                continue
+            if "tools" not in (model.get("supported_parameters") or []):
+                continue
+            pricing = model.get("pricing") or {}
+            if not (_is_zero_price(pricing.get("prompt")) and _is_zero_price(pricing.get("completion"))):
+                continue
+            label = str(model.get("name") or model_id).strip()
+            discovered_records.append({"model_id": model_id, "label": label})
+
+        if discovered_records:
+            source = "provider-api"
+        else:
+            discovery_error = "no free tool-capable models returned"
+
+        merged = _merge_model_records(provider, discovered_records, fallback)
+        _AGENT_MODEL_LIST_CACHE[provider] = {
+            "fetched_at": now, "models": merged, "error": discovery_error, "source": source,
         }
         return merged, discovery_error
 
@@ -931,6 +1162,18 @@ def _build_auth_provider_payload(provider: str) -> dict:
         "requires_token": _provider_requires_token(provider),
         "base_url": base_url,
     }
+    # "connected" = explicitly connected in-app (authorizes spend). Distinct from
+    # merely "configured" (which a stray env-var key would also satisfy). This
+    # MUST match the authoritative runtime callability gate exactly: membership
+    # in the connected set AND a usable token. Otherwise an expired-token /
+    # token-gone provider would show connected in the UI while the runtime
+    # refuses to call it.
+    try:
+        from forven import model_selection
+
+        payload["connected"] = model_selection.provider_is_connected(provider)
+    except Exception:
+        payload["connected"] = configured
     if last_refresh_error:
         payload["last_refresh_error"] = str(last_refresh_error)[:500]
     return payload
@@ -987,11 +1230,20 @@ def _get_model_policy_compat() -> dict:
     }
 
     fallback_chains = {}
-    for provider, chain in (policy.get("fallback_chains") or {}).items():
-        normalized_provider = str(provider).strip().lower()
-        if normalized_provider not in _SUPPORTED_AUTH_PROVIDERS:
+    for key, chain in (policy.get("fallback_chains") or {}).items():
+        normalized = str(key).strip().lower()
+        # Keep per-provider chains AND the slot-scoped chains the Routing &
+        # Fallbacks UI writes (the global "backup" and "aux:<kind>"), so per-slot
+        # fallback lists round-trip instead of being stripped on read.
+        is_provider = normalized in _SUPPORTED_AUTH_PROVIDERS
+        is_slot = (
+            normalized == "backup"
+            or normalized.startswith("aux:")
+            or normalized.startswith("agent:")
+        )
+        if not (is_provider or is_slot):
             continue
-        fallback_chains[normalized_provider] = [
+        fallback_chains[normalized] = [
             {"provider": chain_entry.get("provider"), "model_id": chain_entry.get("model_id")}
             for chain_entry in chain
             if chain_entry.get("provider") and chain_entry.get("model_id")
@@ -1012,6 +1264,55 @@ def _get_model_policy_compat() -> dict:
     }
 
 
+def _not_connected_warning(provider: str, model: str) -> dict:
+    """Structured warning for a (provider, model) whose provider is not connected."""
+    return {
+        "provider": provider,
+        "model": model,
+        "reason": "provider not connected — this selection will not run until you connect it",
+    }
+
+
+def _provider_is_connected_safe(provider: str) -> bool:
+    """provider_is_connected() that fails open (True) so a model_selection import
+    failure never invents spurious "not connected" warnings."""
+    try:
+        from forven import model_selection
+
+        return model_selection.provider_is_connected(provider)
+    except Exception:
+        return True
+
+
+def _collect_model_policy_warnings(next_policy: dict) -> list[dict]:
+    """Warn for each (provider, model) the policy points at whose provider is not
+    connected. Saving still proceeds (runtime fails closed anyway) — this is
+    purely operator feedback so a selection that cannot run is visible."""
+    warnings: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(provider: object, model: object) -> None:
+        prov = str(provider or "").strip().lower()
+        mdl = str(model or "").strip()
+        if not prov:
+            return
+        key = (prov, mdl)
+        if key in seen:
+            return
+        if _provider_is_connected_safe(prov):
+            return
+        seen.add(key)
+        warnings.append(_not_connected_warning(prov, mdl))
+
+    for provider, model in (next_policy.get("default_models") or {}).items():
+        _add(provider, model)
+    for chain in (next_policy.get("fallback_chains") or {}).values():
+        for entry in chain or []:
+            if isinstance(entry, dict):
+                _add(entry.get("provider"), entry.get("model_id"))
+    return warnings
+
+
 def _coerce_model_policy_update_payload(body: "ModelPolicyUpdateBody") -> dict:
     updates = body.dict(exclude_unset=True)
     current = get_model_routing_snapshot()
@@ -1019,13 +1320,22 @@ def _coerce_model_policy_update_payload(body: "ModelPolicyUpdateBody") -> dict:
         "provider_priority": updates.get("provider_priority", current.get("provider_priority", [])),
         "default_models": updates.get("default_models", current.get("default_models", {})),
         "fallback_chains": updates.get("fallback_chains", current.get("fallback_chains", {})),
+        # Carry auxiliary forward so a model-policy save never silently resets it
+        # to the hardcoded openrouter defaults (it is edited via
+        # /api/brain/auxiliary). Without this, every routing save re-introduced
+        # spend on an unconfigured provider.
+        "auxiliary": updates.get("auxiliary", current.get("auxiliary", {})),
     }
     return update_model_routing(next_policy)
 
 
 def _update_model_policy(body: "ModelPolicyUpdateBody") -> dict:
-    _coerce_model_policy_update_payload(body)
-    return _get_model_policy_compat()
+    saved = _coerce_model_policy_update_payload(body)
+    response = _get_model_policy_compat()
+    # Additive, backward-compatible: name each persisted (provider, model) whose
+    # provider is not connected so the operator knows the selection will not run.
+    response["warnings"] = _collect_model_policy_warnings(saved or {})
+    return response
 
 
 def _normalize_auth_provider(provider: str) -> str:
@@ -1060,21 +1370,38 @@ def _normalize_agent_model_row(row: dict | None) -> dict | None:
     return normalized
 
 
+def _read_first_nonempty_workspace(paths: list[str]) -> str:
+    """Return the first non-empty workspace file among ``paths`` (else "")."""
+    for path in paths:
+        content = read_workspace(path, optional=True)
+        if content and content.strip():
+            return content
+    return ""
+
+
 def _build_agent_documents(agent_id: str) -> dict:
-    role_path_candidates = [
+    # SOUL.md and AGENTS.md are now PER-AGENT (agents/<id>/...), each seeded
+    # from the shipped templates. Fall back to the GLOBAL file only when a
+    # per-agent copy is absent (backward-compat for agents seeded before this
+    # change). ROLE.md has always been per-agent.
+    soul = _read_first_nonempty_workspace([
+        f"agents/{agent_id}/SOUL.md",
+        f"agents/{agent_id}/soul.md",
+    ])
+    if not soul:
+        soul = read_workspace("SOUL.md", optional=True) or ""
+
+    agents = _read_first_nonempty_workspace([
+        f"agents/{agent_id}/AGENTS.md",
+        f"agents/{agent_id}/agents.md",
+    ])
+    if not agents:
+        agents = read_workspace("AGENTS.md", optional=True) or ""
+
+    role = _read_first_nonempty_workspace([
         f"agents/{agent_id}/ROLE.md",
         f"agents/{agent_id}/role.md",
-    ]
-
-    soul = read_workspace("SOUL.md", optional=True) or ""
-    agents = read_workspace("AGENTS.md", optional=True) or ""
-    role = ""
-    for path in role_path_candidates:
-        role_content = read_workspace(path, optional=True)
-        if role_content and role_content.strip():
-            role = role_content
-            break
-
+    ])
     if not role:
         db_agent = _lookup_agent(agent_id)
         role = str((db_agent or {}).get("role", ""))
@@ -1652,12 +1979,14 @@ def _normalize_agent_model_key(raw: str) -> str | None:
     raw = raw.strip()
     if not raw:
         return None
+    # Split on the FIRST colon only: provider:model_id. The model_id may itself
+    # contain colons — OpenRouter free models are "vendor/model:free" — so we
+    # must NOT reject a model_id that still contains a colon (that dropped every
+    # OpenRouter :free key on save, reverting the Models-tab checkbox).
     provider, _, model_id = raw.partition(":")
     provider = provider.strip().lower()
     model_id = model_id.strip()
     if not provider or not model_id:
-        return None
-    if ":" in model_id:
         return None
     provider, normalized_model_id = normalize_provider_and_model(provider, model_id)
     if provider not in _SUPPORTED_AUTH_PROVIDERS:
@@ -6880,16 +7209,92 @@ def upsert_auth_provider(provider: str, body: AuthProviderProfileBody):
     if not profile:
         raise HTTPException(status_code=400, detail=f"invalid credentials payload for {normalized_provider}")
 
+    # Reject a definitively-invalid key at entry time. Only when a new token is
+    # being set (not a base_url-only update) and never for lmstudio (local, no
+    # key to verify). _verify_provider_key raises HTTPException(400) on a hard
+    # rejection (400/401/403); transient/unverifiable outcomes are tolerated so
+    # a network blip can't block a legitimate save.
+    if access_token and normalized_provider != "lmstudio":
+        _verify_provider_key(normalized_provider, access_token)
+
     upsert_profile(normalized_provider, profile)
+    # Record an explicit in-app connection so the fail-closed model gate treats
+    # this provider as usable (an env-var key alone never authorizes spend).
+    try:
+        from forven.model_selection import mark_provider_connected
+
+        mark_provider_connected(normalized_provider)
+    except Exception:
+        log.exception("failed to mark %s connected", normalized_provider)
     return {"ok": True, "provider": normalized_provider}
 
 
 def delete_auth_provider(provider: str):
     normalized_provider = _normalize_auth_provider(provider)
     removed = delete_profile(normalized_provider)
+    # Forget the in-app connection so the provider can no longer authorize spend.
+    try:
+        from forven.model_selection import unmark_provider_connected
+
+        unmark_provider_connected(normalized_provider)
+    except Exception:
+        log.exception("failed to unmark %s", normalized_provider)
     if not removed:
         return {"ok": False, "provider": normalized_provider, "removed": False}
     return {"ok": True, "provider": normalized_provider, "removed": True}
+
+
+def _verify_provider_key(provider: str, token: str) -> tuple[str, str]:
+    """Probe *provider* to check *token* is actually valid.
+
+    Returns ``(state, message)`` where state is:
+      - ``"ok"``           — provider accepted the key (HTTP 200/429)
+      - ``"no_endpoint"``  — no way to verify this provider remotely
+      - ``"unreachable"``  — had an endpoint but it didn't answer (404/5xx/network)
+
+    Raises ``HTTPException(400)`` when the provider *definitively* rejects the
+    key (HTTP 400/401/403) — that is a real "bad key" signal, distinct from a
+    transient failure callers may choose to tolerate.
+    """
+    endpoints = (
+        _AUTH_TEST_ENDPOINT_OVERRIDES.get(provider)
+        or _MODEL_DISCOVERY_ALT_ENDPOINTS.get(provider, [])
+    )
+    headers_template = (
+        _AUTH_TEST_HEADER_OVERRIDES.get(provider)
+        or _MODEL_DISCOVERY_HEADERS.get(provider, {})
+    )
+    if not (endpoints and headers_template):
+        return "no_endpoint", "not verifiable for this provider"
+
+    header = {key: value.format(token=token) for key, value in headers_template.items()}
+    last_error: str | None = None
+    for endpoint in endpoints:
+        try:
+            with httpx.Client(timeout=15) as client:
+                response = client.get(endpoint, headers=header)
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        code = response.status_code
+        if code == 200:
+            try:
+                models = _extract_discovery_models(response.json(), provider)
+                note = f" ({len(models)} models available)" if models else ""
+            except Exception:
+                note = ""
+            return "ok", f"Connected{note}"
+        if code == 429:
+            return "ok", "Key valid (rate-limited at test time)"
+        if code in (400, 401, 403):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{provider}: invalid API key (HTTP {code})",
+            )
+        last_error = f"HTTP {code}"
+        continue
+
+    return "unreachable", last_error or "no endpoint responded"
 
 
 def test_auth_provider(provider: str):
@@ -6927,11 +7332,21 @@ def test_auth_provider(provider: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not token:
         raise HTTPException(status_code=400, detail=f"{normalized_provider} token missing after load")
+
+    # Verify the key against the provider — a present-but-invalid key must fail.
+    # _verify_provider_key raises on a definitive rejection (400/401/403).
+    state, message = _verify_provider_key(normalized_provider, token)
+    if state == "unreachable":
+        # Test is strict: an endpoint exists but we couldn't confirm the key.
+        raise HTTPException(
+            status_code=400,
+            detail=f"{normalized_provider}: could not verify key ({message})",
+        )
     return {
         "ok": True,
         "provider": normalized_provider,
         "status": _build_auth_provider_payload(normalized_provider)["status"],
-        "message": "Token loaded successfully",
+        "message": message if state == "ok" else "Token saved (not verified against provider)",
     }
 
 
@@ -7090,10 +7505,13 @@ def put_agent_document(agent_id: str, document: str, payload: LegacyAgentDocumen
 
     key = document.strip().lower()
     content = payload.content or ""
+    # SOUL.md and AGENTS.md are now PER-AGENT — write the edited content to the
+    # agent's own copy (agents/<id>/...) rather than the shared global file, so
+    # editing one agent's identity never bleeds into the others.
     if key == "soul":
-        write_workspace("SOUL.md", content)
+        write_workspace(f"agents/{agent_id}/SOUL.md", content)
     elif key == "agents":
-        write_workspace("AGENTS.md", content)
+        write_workspace(f"agents/{agent_id}/AGENTS.md", content)
     elif key == "role":
         write_workspace(f"agents/{agent_id}/ROLE.md", content)
         update_agent(agent_id, role=content)
@@ -7115,7 +7533,16 @@ def patch_agent_model(agent_id: str, payload: LegacyAgentModelBody):
         model=model,
         model_id=model_id,
     )
-    return get_agent(agent_id)
+    response = get_agent(agent_id)
+    # Additive, backward-compatible: warn (without blocking the save) when the
+    # selected provider is not connected, so the operator knows this agent's
+    # model will not run until they connect it. Runtime fails closed anyway.
+    warnings: list[dict] = []
+    if not _provider_is_connected_safe(model):
+        warnings.append(_not_connected_warning(str(model or "").strip().lower(), model_id))
+    if isinstance(response, dict):
+        response["warnings"] = warnings
+    return response
 
 
 def post_agent_test_discord(agent_id: str, payload: AgentDiscordTestBody | None = None):

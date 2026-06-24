@@ -301,6 +301,33 @@ async def lifespan(_app: FastAPI):
     # the Discord bot connected, which left a fresh install with an empty
     # `agents` table and every PATCH /api/agents/*/model returning 404.
     # Running it here makes the Agent Hub usable without Discord.
+
+    # Spend-safety: seed the in-app "connected providers" set from existing
+    # credential profiles (so upgrades keep working without re-connecting) and
+    # turn ON the fail-closed model-selection gate. After this the bot only
+    # calls providers the operator explicitly connected AND models they selected.
+    try:
+        from forven.model_selection import (
+            enable_enforcement,
+            migrate_connected_from_profiles,
+        )
+
+        migrate_connected_from_profiles()
+        enable_enforcement()
+        log.info("Model-selection enforcement enabled (fail-closed routing).")
+    except Exception:
+        log.exception("Failed to initialize model-selection enforcement.")
+
+    # Seed the workspace identity files on the API-owned runtime. The only other
+    # caller (the Discord bot's _bootstrap) is skipped in gateway-only mode,
+    # which left SOUL.md/AGENTS.md/IDENTITY.md uncreated. Idempotent.
+    try:
+        from forven.workspace import init_workspace
+
+        init_workspace()
+    except Exception:
+        log.exception("Workspace init failed at startup.")
+
     try:
         from forven.bot import seed_default_agents
         result = seed_default_agents()

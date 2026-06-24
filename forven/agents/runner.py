@@ -14,6 +14,7 @@ from contextvars import Token
 from datetime import datetime, timedelta, timezone
 
 from forven.ai import (
+    _is_quota_exhausted,
     _is_rate_limit_exception,
     call_ai,
     is_transient_provider_exception,
@@ -22,8 +23,13 @@ from forven.ai import (
 from forven.async_utils import spawn
 from forven.context import build_agent_context
 from forven.cost_pricing import estimate_cost_usd
-from forven.db import claim_pending_agent_tasks, create_pending_task, format_prefixed_id, get_db, get_task_tool_calls, init_db, is_user_active, kv_get, log_activity
+from forven.db import claim_pending_agent_tasks, create_pending_task, format_prefixed_id, get_db, get_task_tool_calls, init_db, is_user_active, kv_get, kv_set, log_activity
 from forven.model_routing import get_fallback_chain
+from forven.provider_runtime_health import (
+    record_call_failure,
+    record_provider_event,
+    record_provider_ok,
+)
 from forven.research_context import build_research_context, coerce_research_contract
 from forven.task_timeouts import DEFAULT_AGENT_TASK_TIMEOUT_SECONDS, resolve_agent_task_timeout_seconds
 from forven.workspace import append_workspace, read_workspace
@@ -61,6 +67,12 @@ log = logging.getLogger("forven.agents.runner")
 
 _MAX_RATE_LIMIT_RETRIES = 3
 _RATE_LIMIT_BACKOFF_MINUTES = (1, 2, 5)
+# Persistent quota/billing exhaustion (spend cap, out of credits): retrying
+# within minutes can't help, so back off on the scale of tens of minutes and
+# raise ONE deduped actionable alert per provider rather than per task.
+_MAX_QUOTA_EXHAUSTED_RETRIES = 3
+_QUOTA_EXHAUSTED_BACKOFF_MINUTES = (30, 60, 120)
+_PROVIDER_QUOTA_ALERT_COOLDOWN_MINUTES = 30
 _MAX_TRANSIENT_PROVIDER_RETRIES = 3
 _TRANSIENT_PROVIDER_BACKOFF_MINUTES = (2, 5, 10)
 # Missing/expired provider credentials are an OPERATOR-fixable condition, not a
@@ -97,13 +109,31 @@ def _coerce_task_input_data(task: dict) -> dict:
     return {}
 
 
-def _resolve_tool_call_chain(provider: str, model_id: str) -> list[tuple[str, str]]:
-    """Return the tool-call provider chain, preserving the agent's configured model."""
+def _resolve_tool_call_chain(
+    provider: str, model_id: str, agent_id: str | None = None
+) -> list[tuple[str, str]]:
+    """Return the tool-call provider chain, preserving the agent's configured model.
+
+    The fallback portion is the agent's OWN operator-configured fallback chain
+    (Routing tab, stored under ``fallback_chains['agent:<id>']``) — not the
+    per-provider chain — so each agent falls back only to models the operator
+    explicitly chose for it. With no configured fallback, the chain is just the
+    agent's model (fail closed; the credential/backup logic in _call_with_tools
+    still backstops a runtime credential failure).
+    """
     provider, model_id = normalize_provider_and_model(provider, model_id)
+    agent_fallbacks: list[tuple[str, str]] = []
+    if agent_id:
+        try:
+            from forven.model_selection import _policy_slot_fallbacks
+
+            agent_fallbacks = _policy_slot_fallbacks(f"agent:{agent_id}")
+        except Exception:
+            agent_fallbacks = []
     chain: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
 
-    for entry in [(provider, model_id), *get_fallback_chain(provider)]:
+    for entry in [(provider, model_id), *agent_fallbacks]:
         active_provider, active_model = entry
         if not active_provider or not active_model:
             continue
@@ -182,6 +212,7 @@ def _resolve_backup_provider(primary_provider: str) -> tuple[str, str] | None:
 async def _call_with_tools(
     provider: str, model_id: str, messages: list[dict], system: str,
     tools: list[dict] | None = None,
+    agent_id: str | None = None,
 ) -> tuple[str, dict]:
     """Call AI with tool support — implements the tool-call loop.
 
@@ -199,7 +230,7 @@ async def _call_with_tools(
     surfaces a clear error about THAT provider instead of an unrelated
     fallback's auth error.
     """
-    chain = _resolve_tool_call_chain(provider, model_id)
+    chain = _resolve_tool_call_chain(provider, model_id, agent_id)
     # If the configured PRIMARY provider itself has no credentials, fail clearly
     # about IT rather than silently falling back to a different provider the user
     # did not select (e.g. Brain set to minimax must not quietly call openai).
@@ -225,6 +256,12 @@ async def _call_with_tools(
                 if entry[0] not in (primary_provider, backup[0])
                 and _provider_has_credentials(entry[0])
             ]
+            # Loud, visible record of the silent switch (was log-only).
+            record_provider_event(
+                primary_provider, "fallback",
+                f"{primary_provider} has no usable credentials — using backup {backup[0]}",
+                fallback_to=backup[0],
+            )
         else:
             from forven.auth.store import CredentialError, credential_status
 
@@ -248,14 +285,28 @@ async def _call_with_tools(
                 active_provider, active_model, list(messages), system, tools,
                 progress=progress,
             )
+            # Health is keyed on the provider that ACTUALLY ran — a working
+            # fallback must never mark the (broken) primary healthy.
+            record_provider_ok(active_provider)
             if chain_idx > 0:
                 log.warning(
                     "Tool-call fallback succeeded: %s/%s (after %d failures)",
                     active_provider, active_model, chain_idx,
                 )
+                # Surface the silent switch LOUDLY (amber banner / Health tab),
+                # per the fail-loud invariant: the primary degraded but a
+                # configured fallback carried the task.
+                record_provider_event(
+                    primary_provider, "fallback",
+                    f"{primary_provider} failed — recovered on {active_provider}",
+                    fallback_to=active_provider,
+                )
             return result
         except Exception as e:
             last_error = e
+            # Record against the provider that actually failed (not the agent's
+            # configured primary) so the banner/Discord name the right provider.
+            record_call_failure(active_provider, e)
             if progress["tools_executed"]:
                 # The loop already executed at least one (potentially
                 # side-effecting) tool. Restarting on a fallback provider would
@@ -335,6 +386,10 @@ async def _call_with_tools_single(
                 ),
             })
 
+        # Spend-safety chokepoint for the tool-call path (no-op until enforced).
+        from forven.model_selection import assert_callable
+
+        assert_callable(provider, model_id, slot=f"agent-tool-call:{provider}")
         token = get_token(provider)
         response = await impl.call(model_id, messages, system, active_tools, token)
         _accum(response.usage)
@@ -475,8 +530,14 @@ def _requeue_agent_task(
     backoff_minutes: tuple[int, ...] | None = None,
     max_retries: int | None = None,
     exhausted_label: str = "retries exhausted",
+    quiet: bool = False,
 ) -> bool:
-    """Requeue a task for retry.  Returns False if the task has exceeded max retries."""
+    """Requeue a task for retry.  Returns False if the task has exceeded max retries.
+
+    ``quiet`` suppresses the per-requeue activity warning — used when the caller
+    raises its own (deduplicated) alert instead, to avoid flooding the alerts
+    panel when many tasks fail for the same persistent reason.
+    """
     with get_db() as conn:
         row = conn.execute("SELECT retry_count FROM agent_tasks WHERE id = ?", (task_id,)).fetchone()
         retry_count = int(row["retry_count"] or 0) if row else 0
@@ -512,12 +573,39 @@ def _requeue_agent_task(
                 task_id,
             ),
         )
+    if not quiet:
+        log_activity(
+            "warning",
+            f"agent:{agent_id}",
+            f"Task requeued (retry {retry_count + 1}, wait {delay_minutes}m): {title}",
+        )
+    return True
+
+
+def _emit_provider_quota_alert(provider: str, detail: str) -> None:
+    """Raise an actionable provider-exhaustion alert, deduped per provider.
+
+    A persistent quota/spend-cap failure affects every agent on that provider,
+    so without dedup the alerts panel floods. Emit at most one per provider per
+    cooldown window (tracked in the KV store so it survives across tasks).
+    """
+    provider_key = (provider or "unknown").strip().lower() or "unknown"
+    cooldown_key = f"forven:provider-quota-alert:{provider_key}"
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        last_ts = float(kv_get(cooldown_key, 0) or 0)
+    except (TypeError, ValueError):
+        last_ts = 0.0
+    if now - last_ts < _PROVIDER_QUOTA_ALERT_COOLDOWN_MINUTES * 60:
+        return
+    kv_set(cooldown_key, now)
     log_activity(
         "warning",
-        f"agent:{agent_id}",
-        f"Task requeued (retry {retry_count + 1}, wait {delay_minutes}m): {title}",
+        f"provider:{provider_key}",
+        f"{provider_key} quota/spend cap exhausted — tasks are retrying on a long "
+        f"backoff. Raise the cap / add credits, or switch the agents to another "
+        f"provider. Detail: {detail[:280]}",
     )
-    return True
 
 
 def _resolve_task_timeout_seconds(task_type: str) -> int:
@@ -1097,7 +1185,9 @@ async def _run_agent_task_inner(
                 provider, model_id = alt
         messages = [{"role": "user", "content": prompt}]
 
-        response, usage = await _call_with_tools(provider, model_id, messages, context, tools=agent_tools)
+        response, usage = await _call_with_tools(
+            provider, model_id, messages, context, tools=agent_tools, agent_id=agent_id
+        )
         cost_usd = estimate_cost_usd(provider, model_id, usage)
 
         # Prepend a ground-truth tool-execution ledger so operators can cross-
@@ -1324,6 +1414,9 @@ async def _run_agent_task_inner(
         except Exception:
             pass
 
+        # Provider runtime-health is recorded inside _call_with_tools, keyed on
+        # the provider that ACTUALLY ran — so a working fallback never marks a
+        # broken primary green. Nothing to record here.
         log.info("Agent %s completed task %d", agent_id, task_id)
         return output
 
@@ -1335,6 +1428,42 @@ async def _run_agent_task_inner(
         # errors: re-running the task can re-submit the order and open a duplicate
         # position. Fail safe instead (fall through to status='failed' + early
         # return below); the Brain/operator can re-evaluate explicitly.
+        # Fail-closed spend-safety stop (no connected & selected model). Don't
+        # dead-letter — it self-heals once the operator connects + selects a
+        # model. Provider health is already recorded (keyed on the real provider)
+        # inside _call_with_tools.
+        from forven.model_selection import UnconfiguredRouteError
+
+        if isinstance(e, UnconfiguredRouteError) and not is_trade_execution_task:
+            _requeue_agent_task(
+                task_id,
+                agent_id,
+                task.get("title", ""),
+                f"No connected & selected model configured; waiting to resume: {error_summary[:300]}",
+                backoff_minutes=_MISSING_CREDENTIALS_BACKOFF_MINUTES,
+                max_retries=_MAX_MISSING_CREDENTIALS_RETRIES,
+                exhausted_label="Unconfigured-route retries exhausted",
+            )
+            return {"error": error_summary}
+
+        # Persistent quota/billing exhaustion (spend cap, out of credits) is
+        # checked BEFORE the generic rate-limit branch: it won't clear on a
+        # minute-scale retry, so back off long and raise ONE deduped actionable
+        # alert per provider instead of flooding the alerts panel per task.
+        if _is_quota_exhausted(e) and not is_trade_execution_task:
+            _requeue_agent_task(
+                task_id,
+                agent_id,
+                task.get("title", ""),
+                f"Provider quota/spend cap exhausted: {error_summary[:350]}",
+                backoff_minutes=_QUOTA_EXHAUSTED_BACKOFF_MINUTES,
+                max_retries=_MAX_QUOTA_EXHAUSTED_RETRIES,
+                exhausted_label="Quota-exhaustion retries exhausted",
+                quiet=True,
+            )
+            _emit_provider_quota_alert(str(agent.get("model") or ""), error_summary)
+            return {"error": error_summary}
+
         if _is_rate_limit_exception(e) and not is_trade_execution_task:
             _requeue_agent_task(
                 task_id,

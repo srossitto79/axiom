@@ -620,6 +620,68 @@ class TestHealthMonitor:
                 await monitor.stop()
         asyncio.run(_run())
 
+    def test_poll_loop_observes_and_alerts_in_manual_mode(self):
+        """In MANUAL mode the read-only checks AND alert dispatch must still run
+        (so a down AI provider lights the critical banner / Discord alert), but
+        the auto-recovery (which takes action) must NOT run."""
+        async def _run():
+            monitor = HealthMonitor(poll_interval=0.05, data_check_interval=100)
+            down = ComponentStatus(name="ai_providers", state=State.RED, message="quota exhausted")
+
+            with patch("forven.health_monitor.autonomous_runtime_allowed", return_value=False), \
+                 patch("forven.health_monitor.check_ai_providers", return_value=down) as ai_check, \
+                 patch("forven.health_monitor._dispatch_alerts") as dispatch, \
+                 patch("forven.health_monitor._attempt_recovery") as recovery:
+                await monitor.start()
+                await asyncio.sleep(0.15)
+                await monitor.stop()
+
+            # Observability + alerting ran despite manual mode.
+            assert ai_check.called
+            assert dispatch.called
+            # Auto-recovery did NOT run in manual mode.
+            assert not recovery.called
+            # And the RED state was actually recorded.
+            assert monitor.state.get_component("ai_providers").state == State.RED
+        asyncio.run(_run())
+
+    def test_poll_loop_auto_recovers_in_autonomous_mode(self):
+        """In autonomous mode a freshly-RED component triggers auto-recovery."""
+        async def _run():
+            monitor = HealthMonitor(poll_interval=0.05, data_check_interval=100)
+            down = ComponentStatus(name="ai_providers", state=State.RED, message="down")
+
+            with patch("forven.health_monitor.autonomous_runtime_allowed", return_value=True), \
+                 patch("forven.health_monitor.check_ai_providers", return_value=down), \
+                 patch("forven.health_monitor._dispatch_alerts"), \
+                 patch("forven.health_monitor._attempt_recovery") as recovery:
+                await monitor.start()
+                await asyncio.sleep(0.15)
+                await monitor.stop()
+
+            assert recovery.called
+        asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Watchdog crash => visible (AMBER), never GREEN
+# ---------------------------------------------------------------------------
+
+class TestWatchdogCrashIsVisible:
+    def test_data_freshness_crash_returns_amber_not_green(self):
+        from forven.health_monitor import check_data_freshness
+
+        with patch("forven.data_manager.data_manager_stats", side_effect=Exception("boom")):
+            result = check_data_freshness()
+        assert result.state == State.AMBER
+        assert "Check failed" in result.message
+
+    def test_pipeline_throughput_crash_returns_amber_not_green(self):
+        with patch("forven.lab_db.get_lab_meta", side_effect=Exception("boom")):
+            result = check_pipeline_throughput()
+        assert result.state == State.AMBER
+        assert "Check failed" in result.message
+
 
 # ---------------------------------------------------------------------------
 # Auto-recovery

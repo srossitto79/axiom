@@ -2,13 +2,118 @@
 
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from forven.config import LEGACY_WORKSPACE_DIR, WORKSPACE_DIR
 from forven.ai import normalize_provider_and_model
 from forven.db import get_db, init_db, get_agents, normalize_agent_visibility
-from forven.workspace import write_workspace
+from forven.workspace import read_workspace, write_workspace
 
 log = logging.getLogger("forven.agents.manager")
+
+# Per-agent identity files. Each sub-agent gets its own copy of SOUL.md and
+# AGENTS.md (seeded from the shipped templates, lightly personalized) plus a
+# bespoke ROLE.md. A single GLOBAL IDENTITY.md (mission/risk) is shared by all
+# and is intentionally NOT made per-agent.
+_TEMPLATE_DIR = Path(__file__).resolve().parent.parent.parent / "templates" / "workspace"
+
+
+def _render_role_md(name: str, role: str, instructions: str | None) -> str:
+    """Build the per-agent ROLE.md body (unchanged historical format)."""
+    role_content = f"# {name}\n\n{role}\n"
+    if instructions:
+        role_content += f"\n## Instructions\n\n{instructions}\n"
+    return role_content
+
+
+def _load_template(filename: str) -> str:
+    """Read a shipped workspace template (SOUL.md / AGENTS.md).
+
+    Falls back to whatever the workspace currently has for that file (the
+    global copy seeded by init_workspace) and finally to a minimal stub, so a
+    missing template never blocks agent seeding.
+    """
+    src = _TEMPLATE_DIR / filename
+    try:
+        if src.exists():
+            text = src.read_text(encoding="utf-8", errors="replace")
+            if text.strip():
+                return text
+    except OSError:
+        pass
+    # Fall back to the global workspace copy if the template is unavailable.
+    global_copy = read_workspace(filename, optional=True)
+    if global_copy and global_copy.strip():
+        return global_copy
+    return f"# {filename.replace('.md', '')}\n"
+
+
+def _render_soul_md(name: str, role: str) -> str:
+    """Personalize the shipped SOUL template with a per-agent header."""
+    base = _load_template("SOUL.md")
+    header = (
+        f"# {name} — Identity\n\n"
+        f"_You are **{name}**, a Forven sub-agent. Your role: {role}_\n\n"
+        f"Everything below is Forven's shared soul — internalize it as your own.\n\n---\n\n"
+    )
+    return header + base
+
+
+def _render_agents_md(name: str, role: str) -> str:
+    """Personalize the shipped AGENTS template with a per-agent header."""
+    base = _load_template("AGENTS.md")
+    header = (
+        f"# {name} — Workspace Guide\n\n"
+        f"This is **{name}**'s workspace ({role}). The shared operating guide follows.\n\n---\n\n"
+    )
+    return header + base
+
+
+def _has_nonempty_workspace_file(rel_path: str) -> bool:
+    """True when ``rel_path`` already exists with non-empty content in any
+    workspace root. Used so self-heal never overwrites real content."""
+    existing = read_workspace(rel_path, optional=True)
+    return bool(existing and existing.strip())
+
+
+def ensure_agent_identity_files(
+    agent_id: str,
+    name: str,
+    role: str,
+    instructions: str | None = None,
+) -> list[str]:
+    """Idempotently (re)create any MISSING per-agent identity files.
+
+    Writes ``agents/<id>/SOUL.md``, ``agents/<id>/AGENTS.md``, and
+    ``agents/<id>/ROLE.md`` only when they are absent or empty — never
+    overwrites existing non-empty content. Returns the list of relative paths
+    that were written. Safe to call on every startup and from create_agent.
+    """
+    agent_id = str(agent_id or "").strip()
+    if not agent_id:
+        return []
+
+    agent_dir = WORKSPACE_DIR / "agents" / agent_id
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "memory").mkdir(exist_ok=True)
+    (agent_dir / "outputs").mkdir(exist_ok=True)
+
+    written: list[str] = []
+    plan = (
+        ("SOUL.md", lambda: _render_soul_md(name, role)),
+        ("AGENTS.md", lambda: _render_agents_md(name, role)),
+        ("ROLE.md", lambda: _render_role_md(name, role, instructions)),
+    )
+    for filename, renderer in plan:
+        rel = f"agents/{agent_id}/{filename}"
+        if _has_nonempty_workspace_file(rel):
+            continue
+        write_workspace(rel, renderer())
+        written.append(rel)
+
+    if written:
+        log.info("Seeded per-agent identity files for %s: %s", agent_id, written)
+    return written
 
 
 def create_agent(
@@ -48,17 +153,11 @@ def create_agent(
             ),
         )
 
-    # Create workspace directory and ROLE.md
-    agent_dir = WORKSPACE_DIR / "agents" / agent_id
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / "memory").mkdir(exist_ok=True)
-    (agent_dir / "outputs").mkdir(exist_ok=True)
-
-    role_content = f"# {name}\n\n{role}\n"
-    if instructions:
-        role_content += f"\n## Instructions\n\n{instructions}\n"
-
-    write_workspace(f"agents/{agent_id}/ROLE.md", role_content)
+    # Create the agent's workspace directory and seed its per-agent identity
+    # files (SOUL.md, AGENTS.md, ROLE.md). ensure_agent_identity_files creates
+    # the directory tree and only writes files that are missing/empty, so a
+    # re-create never clobbers operator-customized content.
+    ensure_agent_identity_files(agent_id, name, role, instructions)
 
     log.info("Created agent: %s (%s)", name, agent_id)
     return {"id": agent_id, "name": name, "role": role, "model": model}

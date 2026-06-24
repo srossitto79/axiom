@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
+	import { page } from '$app/stores';
+	import { beforeNavigate, goto } from '$app/navigation';
 	import { createPoller, type Poller } from '$lib/utils/polling';
 	import { createRealtimeRefresh, type RealtimeRefreshController } from '$lib/utils/realtime';
 	import { createPersistedStore } from '$lib/stores';
@@ -16,7 +18,6 @@
 		getForvenAgentModelOptions,
 		getForvenModelPolicy,
 		updateForvenAgent,
-		updateForvenAgentModel,
 		updateForvenSchedulerJob
 	} from '$lib/api';
 	import {
@@ -33,6 +34,119 @@
 	import type { AgentHubSettings } from './components/agentHubSettings';
 	import SchedulerJobRow from './components/SchedulerJobRow.svelte';
 	import TaskQueuePanel from './components/TaskQueuePanel.svelte';
+	import AgentDetailDrawer from './components/AgentDetailDrawer.svelte';
+	import ProvidersTab from './components/tabs/ProvidersTab.svelte';
+	import ModelsTab from './components/tabs/ModelsTab.svelte';
+	import RoutingTab from './components/tabs/RoutingTab.svelte';
+	import HealthTab from './components/tabs/HealthTab.svelte';
+	import SchedulesTab from './components/tabs/SchedulesTab.svelte';
+	import { agentsConfig } from './components/agentsConfigStore';
+
+	// ---- Tabbed navigation (?tab=) ---------------------------------------- //
+	type AgentsTab = 'roster' | 'providers' | 'models' | 'routing' | 'schedules' | 'health';
+	const TABS: { id: AgentsTab; label: string }[] = [
+		{ id: 'roster', label: 'Roster' },
+		{ id: 'providers', label: 'Providers & Keys' },
+		{ id: 'models', label: 'Models' },
+		{ id: 'routing', label: 'Routing & Fallbacks' },
+		{ id: 'schedules', label: 'Schedules' },
+		{ id: 'health', label: 'Health' }
+	];
+	const VALID_TABS = new Set<string>(TABS.map((t) => t.id));
+
+	function normalizeTab(value: string | null | undefined): AgentsTab {
+		const v = String(value ?? '').trim().toLowerCase();
+		return VALID_TABS.has(v) ? (v as AgentsTab) : 'roster';
+	}
+
+	let activeTab: AgentsTab = 'roster';
+	// Drive the active tab from the ?tab= query param so deep links work.
+	$: activeTab = normalizeTab($page.url.searchParams.get('tab'));
+
+	// ---- Unsaved-changes guard for config tabs ---------------------------- //
+	// The config tabs (Routing / Models) are destroyed on tab switch — taking
+	// their DirtyBar + local unsaved edits with them. They report their dirty
+	// state out via `onDirtyChange`; we use it to confirm before switching tabs
+	// or navigating away so edits are never silently discarded.
+	let routingDirty = false;
+	let modelsDirty = false;
+	// Only the dirty state of the CURRENTLY active config tab matters — an
+	// inactive tab is unmounted and its reported flag is stale.
+	$: activeConfigTabDirty =
+		(activeTab === 'routing' && routingDirty) || (activeTab === 'models' && modelsDirty);
+
+	// In-app leave/switch confirmation (mirrors settings/+page.svelte).
+	let leavePromptOpen = false;
+	let pendingLeaveUrl: URL | null = null;
+	let confirmedLeave = false;
+
+	function selectTab(tab: AgentsTab) {
+		if (tab === activeTab) return;
+		// Confirm before switching away from a dirty config tab — keep edits if the
+		// operator cancels.
+		if (activeConfigTabDirty) {
+			const proceed = typeof window === 'undefined'
+				? true
+				: window.confirm('You have unsaved changes on this tab. Switch tabs and discard them?');
+			if (!proceed) return;
+		}
+		// The outgoing config tab unmounts on switch and won't report `false`, so
+		// clear its dirty flag here once the switch is committed.
+		routingDirty = false;
+		modelsDirty = false;
+		const url = new URL($page.url);
+		if (tab === 'roster') url.searchParams.delete('tab');
+		else url.searchParams.set('tab', tab);
+		void goto(`${url.pathname}${url.search}`, { replaceState: false, keepFocus: true, noScroll: true });
+	}
+
+	beforeNavigate((navigation) => {
+		// Allow the navigation we re-triggered after the operator confirmed.
+		if (confirmedLeave) {
+			confirmedLeave = false;
+			return;
+		}
+		if (!activeConfigTabDirty) return;
+		// Tab switches go through goto() too, but only change the search params on
+		// this same page — let those through (selectTab already confirmed).
+		const to = navigation.to?.url ?? null;
+		if (to && to.pathname === $page.url.pathname) return;
+		// Cancel and surface a styled in-app prompt instead of a native dialog.
+		navigation.cancel();
+		pendingLeaveUrl = to;
+		leavePromptOpen = true;
+	});
+
+	function cancelLeave(): void {
+		leavePromptOpen = false;
+		pendingLeaveUrl = null;
+	}
+
+	function confirmLeave(): void {
+		leavePromptOpen = false;
+		const url = pendingLeaveUrl;
+		pendingLeaveUrl = null;
+		// pendingLeaveUrl is null for full-page unloads / external nav; nothing to
+		// re-trigger in that case, so just drop the guard.
+		if (!url) return;
+		confirmedLeave = true;
+		void goto(url);
+	}
+
+	// Per-agent detail drawer (Roster tab).
+	let detailAgentId: string | null = null;
+	$: detailAgent = detailAgentId
+		? (agents.find((a) => String(a.id ?? '').trim() === detailAgentId) ?? null)
+		: null;
+	function openAgentDetail(agentId: string) {
+		if (agentId) detailAgentId = agentId;
+	}
+	function closeAgentDetail() {
+		detailAgentId = null;
+	}
+	function handleAgentDetailSaved() {
+		void fetchData();
+	}
 
 	type AgentProvider = ForvenProvider;
 
@@ -208,18 +322,11 @@
 	let mcpLoading = false;
 	let mcpError = '';
 	let mcpBusyServer = '';
-	let savingModelAgentId: string | null = null;
-	let modelErrors: Record<string, string> = {};
-	let modelSelections: Record<string, string> = {};
 	let showSettings = false;
 	let completionSoundPrimed = false;
 	let priorCompletedTaskKeys = new Set<string>();
 	let lastTaskCompletionTick = 0;
 	let clearingTaskErrors = false;
-	let kpiTasksCompletedToday = 0;
-	let kpiTasksErroredToday = 0;
-	let kpiActiveAgents = 0;
-	let kpiJobsDueNextHour = 0;
 	let agentDefs: AgentCard[] = [];
 	let displayedAgentDefs: AgentCard[] = [];
 	let coreAgentCards: AgentCard[] = [];
@@ -228,7 +335,6 @@
 	// Strategy Developer add/rename/remove state
 	let addingDeveloper = false;
 	let newDeveloperName = '';
-	let newDeveloperModelKey = '';
 	let submittingDeveloper = false;
 	let addDeveloperError = '';
 	let removingAgentId: string | null = null;
@@ -237,7 +343,6 @@
 	let renameErrors: Record<string, string> = {};
 	let editingAgentId: string | null = null;
 	let editDraftName = '';
-	let editDraftModelKey = '';
 	let editDraftInstructions = '';
 	let editSavingId: string | null = null;
 	let editErrors: Record<string, string> = {};
@@ -255,7 +360,11 @@
 			value === 'openai' ||
 			value === 'lmstudio' ||
 			value === 'zai' ||
-			value === 'openrouter'
+			value === 'openrouter' ||
+			value === 'anthropic' ||
+			value === 'deepseek' ||
+			value === 'groq' ||
+			value === 'gemini'
 		);
 	}
 
@@ -264,6 +373,10 @@
 		if (provider === 'minimax') return 'MiniMax';
 		if (provider === 'zai') return 'Z.AI';
 		if (provider === 'openrouter') return 'OpenRouter';
+		if (provider === 'anthropic') return 'Anthropic';
+		if (provider === 'deepseek') return 'DeepSeek';
+		if (provider === 'groq') return 'Groq';
+		if (provider === 'gemini') return 'Google Gemini';
 		return 'LM Studio';
 	}
 
@@ -299,7 +412,7 @@
 
 	function buildDefaultModelPresets() {
 		const resolved = new Map<string, AgentModelPreset>();
-		for (const provider of ['openai', 'minimax', 'lmstudio', 'zai', 'openrouter'] as AgentProvider[]) {
+		for (const provider of ['openai', 'minimax', 'lmstudio', 'zai', 'openrouter', 'anthropic', 'deepseek', 'groq', 'gemini'] as AgentProvider[]) {
 			const defaultPreset = resolveDefaultModelPreset(provider);
 			if (defaultPreset) {
 				resolved.set(defaultPreset.key, defaultPreset);
@@ -396,15 +509,6 @@
 			.join(' ');
 	}
 
-	function parseModelSelection(value: string): { provider: AgentProvider; modelId: string } | null {
-		const sep = value.indexOf(':');
-		if (sep <= 0) return null;
-		const providerRaw = value.slice(0, sep).trim().toLowerCase();
-		const modelId = value.slice(sep + 1).trim();
-		if (!isAgentProvider(providerRaw) || modelId.length === 0) return null;
-		return { provider: providerRaw, modelId };
-	}
-
 	function resolveAgentModel(agent: ForvenAgent): { provider: AgentProvider; modelId: string; key: string } {
 		const providerRaw = String(agent.model ?? '').trim().toLowerCase();
 		const provider = inferAgentModelProvider(providerRaw, String(agent.model_id ?? ''));
@@ -423,40 +527,6 @@
 		const found = modelPresets.find((preset) => preset.provider === provider && preset.modelId === modelId);
 		if (found) return found.label;
 		return `${provider}/${modelId}`;
-	}
-
-	function optionsForAgent(agent: AgentCard): AgentModelPreset[] {
-		const byKey = new Map(modelPresets.map((preset) => [preset.key, preset]));
-		if (byKey.has(agent.modelKey)) {
-			return [...modelPresets];
-		}
-		return [
-			...modelPresets,
-			{
-				key: agent.modelKey,
-				label: agent.modelLabel,
-				provider: agent.modelProvider,
-				modelId: agent.modelId,
-				enabled: true
-			}
-		];
-	}
-
-	function selectedModelValue(agent: AgentCard): string {
-		return modelSelections[agent.id] ?? agent.modelKey;
-	}
-
-	function clearModelSelection(agentId: string): void {
-		const next = { ...modelSelections };
-		delete next[agentId];
-		modelSelections = next;
-	}
-
-	function clearModelError(agentId: string): void {
-		if (!agentId) return;
-		const next = { ...modelErrors };
-		delete next[agentId];
-		modelErrors = next;
 	}
 
 	async function dismissTaskAlert(task: ForvenAgentTask, silent = false): Promise<void> {
@@ -488,7 +558,6 @@
 		try {
 			const failedTasks = agentTasks.filter((task) => isErrorTask(task));
 			await Promise.all(failedTasks.map((task) => dismissTaskAlert(task, true)));
-			modelErrors = {};
 			await fetchData();
 			addToast(`Cleared ${failedTasks.length} error alert${failedTasks.length === 1 ? '' : 's'}.`, 'success');
 		} finally {
@@ -611,11 +680,6 @@
 		return Number.isNaN(parsed) ? 0 : parsed;
 	}
 
-	function formatTaskDate(iso?: string | null): string {
-		if ($agentHubSettings.dateFormat === 'relative') return formatRelativeTime(iso);
-		return formatDateTime(iso);
-	}
-
 	function statusColor(status?: string | null): string {
 		if (!status) return 'border-gray-800 text-gray-500';
 		const value = status.toLowerCase();
@@ -631,61 +695,70 @@
 		return (task?.status ?? 'pending').toLowerCase();
 	}
 
-	function isTaskToday(task: ForvenAgentTask, matcher: (entry: ForvenAgentTask) => boolean): boolean {
-		if (!matcher(task)) return false;
-		const ts = parseTime(task.completed_at);
-		if (!ts) return false;
-		const today = new Date();
-		const target = new Date(ts);
-		return target.toDateString() === today.toDateString();
-	}
+	// ---- Per-agent live status + recent outcomes -------------------------- //
+	// All derived from data already loaded on this page (agentTasks); no extra
+	// polling or endpoints.
 
-	function countTasksCompletedToday(): number {
-		return agentTasks.filter((task) => isTaskToday(task, isCompletedTask)).length;
-	}
-
-	function countTasksErroredToday(): number {
-		return agentTasks.filter((task) => isTaskToday(task, isErrorTask)).length;
-	}
-
-	function countActiveAgents(): number {
-		const latestByAgent = new Map<string, ForvenAgentTask>();
-		for (const task of [...agentTasks].sort((a, b) => parseTime(b.created_at) - parseTime(a.created_at))) {
-			const agentId = String(task.agent_id ?? '').trim();
-			if (!agentId || latestByAgent.has(agentId)) continue;
-			latestByAgent.set(agentId, task);
+	/** Latest task for an agent (agentTasks is already newest-first from the API,
+	 * but we sort defensively). */
+	function latestTaskForAgent(agentId: string): ForvenAgentTask | null {
+		let best: ForvenAgentTask | null = null;
+		let bestTs = -1;
+		for (const task of agentTasks) {
+			if (String(task.agent_id ?? '').trim() !== agentId) continue;
+			const ts = Math.max(parseTime(task.created_at), parseTime(task.started_at), parseTime(task.completed_at));
+			if (ts >= bestTs) {
+				bestTs = ts;
+				best = task;
+			}
 		}
-		let count = 0;
-		for (const task of latestByAgent.values()) {
-			if (parseAgentStatus(task) === 'running') count += 1;
+		return best;
+	}
+
+	/** Live status for an agent's card, derived from its most recent task. */
+	function agentLiveStatus(agentId: string): string {
+		const last = latestTaskForAgent(agentId);
+		if (!last) return 'idle';
+		const status = parseAgentStatus(last);
+		if (status === 'pending' || status === 'running' || status === 'brain_invoke') return status;
+		// done / completed / reviewed / error / failed → the agent itself is idle.
+		return 'idle';
+	}
+
+	interface AgentOutcomeSummary {
+		completed: number;
+		failed: number;
+		pending: number;
+	}
+
+	function agentOutcomeSummary(agentId: string): AgentOutcomeSummary {
+		let completed = 0;
+		let failed = 0;
+		let pending = 0;
+		for (const task of agentTasks) {
+			if (String(task.agent_id ?? '').trim() !== agentId) continue;
+			if (isCompletedTask(task)) completed += 1;
+			else if (isErrorTask(task)) failed += 1;
+			else pending += 1;
 		}
-		return count;
+		return { completed, failed, pending };
 	}
 
-	function countJobsDueNextHour(): number {
-		const now = Date.now();
-		const oneHour = 60 * 60 * 1000;
-		return schedulerJobs.filter((job) => {
-			if (job.enabled === false) return false;
-			if (!job.next_run_at) return false;
-			const parsed = parseTime(job.next_run_at);
-			if (!parsed) return false;
-			const diff = parsed - now;
-			return diff >= 0 && diff <= oneHour;
-		}).length;
+	// ---- Roster summary strip (replaces the removed KPI tiles) ------------ //
+	function liveStatusColor(status: string): string {
+		if (status === 'running') return 'border-yellow-500 text-yellow-400';
+		if (status === 'pending') return 'border-gray-500 text-gray-300';
+		if (status === 'brain_invoke') return 'border-purple-500 text-purple-400';
+		return 'border-gray-700 text-gray-500';
 	}
 
-	$: kpiTasksCompletedToday = countTasksCompletedToday();
-	$: kpiTasksErroredToday = countTasksErroredToday();
-	$: kpiActiveAgents = countActiveAgents();
-	$: kpiJobsDueNextHour = countJobsDueNextHour();
-
-	function accentBorderClass(accent: AgentHubSettings['accent']): string {
-		if (accent === 'green') return 'focus:border-green-500';
-		if (accent === 'amber') return 'focus:border-amber-500';
-		if (accent === 'rose') return 'focus:border-rose-500';
-		return 'focus:border-cyan-500';
-	}
+	$: rosterAgentIds = displayedAgentDefs.map((card) => card.id);
+	$: rosterRunningCount = rosterAgentIds.filter((id) => agentLiveStatus(id) === 'running').length;
+	$: rosterIdleCount = rosterAgentIds.filter((id) => agentLiveStatus(id) === 'idle').length;
+	$: rosterPendingBacklog = agentTasks.filter(
+		(task) => parseAgentStatus(task) === 'pending'
+	).length;
+	$: rosterErrorCount = agentTasks.filter((task) => isErrorTask(task)).length;
 
 	function toAgentCard(agent: ForvenAgent): AgentCard | null {
 		const rawId = String((agent as { id?: string; agent_id?: string }).id ?? (agent as { id?: string; agent_id?: string }).agent_id ?? '').trim();
@@ -812,10 +885,6 @@
 		};
 	}
 
-	function getAgentLastTask(agentId: string): ForvenAgentTask | null {
-		return agentTasks.find((task) => task.agent_id === agentId) || null;
-	}
-
 	function normalizeTerminalLog(raw: unknown): AgentLogEntry | null {
 		if (!raw || typeof raw !== 'object') return null;
 		const entry = raw as Record<string, unknown>;
@@ -891,10 +960,6 @@
 		terminalLogsLoaded = false;
 		agentLogs = [];
 		terminalTab = 'memory';
-	}
-
-	function modelSelectId(id: string): string {
-		return `agent-model-${id}`;
 	}
 
 	function mergeModelPresets(base: AgentModelPreset[], incoming: AgentModelPreset[]): AgentModelPreset[] {
@@ -1040,46 +1105,6 @@
 		void loadMCPGrantsView();
 	}
 
-	async function handleModelChange(agent: AgentCard, event: Event) {
-		const target = event.currentTarget as HTMLSelectElement;
-		const requested = parseModelSelection(target.value);
-		if (!requested) {
-			clearModelSelection(agent.id);
-			return;
-		}
-		if (requested.provider === agent.modelProvider && requested.modelId === agent.modelId) {
-			clearModelSelection(agent.id);
-			return;
-		}
-
-		modelSelections = { ...modelSelections, [agent.id]: modelKey(requested.provider, requested.modelId) };
-		modelErrors = { ...modelErrors, [agent.id]: '' };
-		savingModelAgentId = agent.id;
-
-		try {
-			const updated = await updateForvenAgentModel(agent.id, {
-				model: requested.provider,
-				model_id: requested.modelId
-			});
-			agents = agents.map((item) => {
-				const id = String(item.id ?? '').trim();
-				return id === agent.id ? { ...item, ...updated } : item;
-			});
-			clearModelSelection(agent.id);
-			addToast(`${agent.name} model updated`, 'success');
-		} catch (err) {
-			clearModelSelection(agent.id);
-			const message = err instanceof Error ? err.message : 'Failed to update model';
-			modelErrors = {
-				...modelErrors,
-				[agent.id]: message
-			};
-			addToast(message, 'error');
-		} finally {
-			if (savingModelAgentId === agent.id) savingModelAgentId = null;
-		}
-	}
-
 	function getRenameDraft(card: AgentCard): string {
 		return renameDrafts[card.id] ?? card.name;
 	}
@@ -1123,14 +1148,11 @@
 		addingDeveloper = true;
 		addDeveloperError = '';
 		newDeveloperName = '';
-		const defaultPreset = modelPresets.find((preset) => preset.enabled) ?? modelPresets[0];
-		newDeveloperModelKey = defaultPreset?.key ?? '';
 	}
 
 	function cancelAddDeveloperForm() {
 		addingDeveloper = false;
 		newDeveloperName = '';
-		newDeveloperModelKey = '';
 		addDeveloperError = '';
 	}
 
@@ -1140,19 +1162,13 @@
 			addDeveloperError = 'Give the developer a name first.';
 			return;
 		}
-		const parsed = parseModelSelection(newDeveloperModelKey);
-		if (!parsed) {
-			addDeveloperError = 'Pick a model for this developer.';
-			return;
-		}
 		submittingDeveloper = true;
 		addDeveloperError = '';
 		try {
-			const created = await createForvenStrategyDeveloperAgent({
-				name,
-				model: parsed.provider,
-				model_id: parsed.modelId
-			});
+			// The model is no longer chosen here — the developer is created with the
+			// backend default; the operator then picks its model in
+			// Routing & Fallbacks → Agents.
+			const created = await createForvenStrategyDeveloperAgent({ name });
 			const createdId = String((created as { id?: string }).id ?? '').trim();
 			if (createdId) {
 				agents = [...agents.filter((item) => String(item.id ?? '').trim() !== createdId), created];
@@ -1192,7 +1208,6 @@
 		const existing = agents.find((item) => String(item.id ?? '').trim() === card.id);
 		editingAgentId = card.id;
 		editDraftName = card.name;
-		editDraftModelKey = card.modelKey;
 		editDraftInstructions = String(existing?.instructions ?? '');
 		editErrors = { ...editErrors, [card.id]: '' };
 	}
@@ -1200,7 +1215,6 @@
 	function cancelEditForm() {
 		editingAgentId = null;
 		editDraftName = '';
-		editDraftModelKey = '';
 		editDraftInstructions = '';
 	}
 
@@ -1210,18 +1224,12 @@
 			editErrors = { ...editErrors, [card.id]: 'Name is required.' };
 			return;
 		}
-		const parsed = parseModelSelection(editDraftModelKey);
-		if (!parsed) {
-			editErrors = { ...editErrors, [card.id]: 'Pick a model.' };
-			return;
-		}
 		editSavingId = card.id;
 		editErrors = { ...editErrors, [card.id]: '' };
 		try {
+			// Model is set in Routing & Fallbacks → Agents, not here.
 			const payload: ForvenAgentUpdatePayload = {
 				name,
-				model: parsed.provider,
-				model_id: parsed.modelId,
 				instructions: editDraftInstructions
 			};
 			const updated = await updateForvenAgent(card.id, payload);
@@ -1230,7 +1238,6 @@
 				return id === card.id ? { ...item, ...updated } : item;
 			});
 			clearRenameDraft(card.id);
-			clearModelSelection(card.id);
 			addToast(`Updated "${name}"`, 'success');
 			cancelEditForm();
 		} catch (err) {
@@ -1282,6 +1289,9 @@
 	onMount(() => {
 		void fetchData();
 		void fetchModelOptions();
+		// Shared page-level config (providers / models / policy / enabled-keys)
+		// consumed by the Providers / Models / Routing / Health tabs.
+		void agentsConfig.load();
 		taskPollingInterval = $agentHubSettings.pollInterval;
 		startDataRealtime(taskPollingInterval);
 		modelOptionsPoller = createPoller(fetchModelOptions, 120000);
@@ -1334,6 +1344,9 @@
 	$: strategyDeveloperCards = displayedAgentDefs.filter((card) => isStrategyDeveloper(card));
 </script>
 
+<!-- Escape closes the agent terminal overlay when it is open (parity with AgentDetailDrawer). -->
+<svelte:window on:keydown={(event) => { if (event.key === 'Escape' && selectedAgent) closeSelectedAgent(); }} />
+
 <div class="h-full overflow-y-auto p-6 space-y-6">
 	<div class="flex items-center gap-3 mb-2">
 		<svg class="w-6 h-6 text-white" viewBox="0 0 24 24" fill="currentColor">
@@ -1341,21 +1354,26 @@
 		</svg>
 		<h1 class="text-2xl font-bold tracking-tight">Agent Hub</h1>
 		<span class="text-xs text-gray-500">({displayedAgentDefs.length} cards)</span>
-		<a
-			href="/settings#agents"
-			class="px-2 py-1 border border-cyan-800 text-cyan-300 hover:bg-cyan-900/25 rounded whitespace-nowrap transition-colors text-xs uppercase"
-			title="Open Main Settings"
-			aria-label="Open main settings"
-		>
-			Main Settings
-		</a>
 		<div class="flex-1"></div>
+		<a
+			href="/settings"
+			class="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-gray-400 hover:text-gray-200 underline decoration-dotted underline-offset-4 whitespace-nowrap transition-colors"
+			title="App-wide settings: trading, notifications, data (separate page)"
+			aria-label="Open app settings (trading, notifications, data)"
+		>
+			App Settings
+			<svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+				<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+				<polyline points="15 3 21 3 21 9" />
+				<line x1="10" y1="14" x2="21" y2="3" />
+			</svg>
+		</a>
 		<button
 			type="button"
 			class="terminal-button-icon"
 			on:click={() => (showSettings = true)}
-			aria-label="Open agent hub settings"
-			title="Settings"
+			aria-label="Display preferences"
+			title="Display preferences (hub layout, accent, polling)"
 		>
 			<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 				<circle cx="12" cy="12" r="3"></circle>
@@ -1364,11 +1382,33 @@
 		</button>
 	</div>
 
+	<!-- Tab bar (?tab= deep-linkable) -->
+	<div class="flex flex-wrap gap-1 border-b border-[#222]" role="tablist" aria-label="Agents control tabs">
+		{#each TABS as tab (tab.id)}
+			<button
+				type="button"
+				role="tab"
+				aria-selected={activeTab === tab.id}
+				class={`px-4 py-2 text-xs font-bold tracking-wider uppercase transition-colors border-b-2 -mb-px ${
+					activeTab === tab.id
+						? 'text-cyan-300 border-cyan-400'
+						: 'text-gray-500 border-transparent hover:text-gray-300'
+				}`}
+				on:click={() => selectTab(tab.id)}
+			>
+				{tab.label}
+			</button>
+		{/each}
+	</div>
+
+	{#if activeTab === 'roster'}
 	<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
 		{#each coreAgentCards as agent}
-			{@const lastTask = getAgentLastTask(agent.id)}
+			{@const lastTask = latestTaskForAgent(agent.id)}
+			{@const liveStatus = agentLiveStatus(agent.id)}
+			{@const outcome = agentOutcomeSummary(agent.id)}
 			<div
-				class={`bg-[#111] border border-[#333] border-l-2 rounded-lg relative overflow-visible ${statusColor(lastTask?.status).split(' ')[0]}`}
+				class={`bg-[#111] border border-[#333] border-l-2 rounded-lg relative overflow-visible ${liveStatusColor(liveStatus).split(' ')[0]}`}
 			>
 				<button
 					type="button"
@@ -1376,72 +1416,66 @@
 					on:click={() => handleOpenAgent(agent.id)}
 					on:keydown={(event) => handleInteractiveKeydown(event, () => handleOpenAgent(agent.id))}
 				>
-					<div class="flex items-center gap-2 font-bold text-sm text-gray-200 mb-1">
+					<div class="flex items-center gap-2 font-bold text-sm text-gray-200 mb-2">
 						<svg class="w-4 h-4 text-gray-400 group-hover:text-white transition-colors" viewBox="0 0 24 24" fill="currentColor">
 							<path d={agent.icon} />
 						</svg>
 						{agent.name}
+						<span class={`ml-auto text-[10px] px-1.5 py-0.5 rounded border ${liveStatusColor(liveStatus)} uppercase font-bold tracking-wider`}>
+							{liveStatus}
+						</span>
 						{#if agent.visibility === 'internal'}
-							<span class="ml-auto text-[9px] uppercase tracking-[0.2em] text-amber-400">Internal</span>
+							<span class="text-[9px] uppercase tracking-[0.2em] text-amber-400">Internal</span>
 						{/if}
 					</div>
-					{#if !$agentHubSettings.compactCards}
-						<div class="text-[10px] text-gray-500 uppercase tracking-widest mb-3">{agent.modelLabel}</div>
-					{/if}
 					{#if lastTask}
+						<div class="text-[10px] text-gray-600 uppercase tracking-widest mb-0.5">Last task</div>
 						<div class="text-xs text-gray-300 truncate mb-1" title={lastTask.title || lastTask.type}>
 							{lastTask.title || lastTask.type}
 						</div>
-						<div class="flex items-center gap-2">
+						<div class="flex items-center gap-2 flex-wrap">
 							<span class={`text-[10px] px-1.5 py-0.5 rounded border ${statusColor(lastTask.status ?? 'pending')} uppercase font-bold tracking-wider`}>
 								{lastTask.status ?? 'pending'}
 							</span>
-							{#if lastTask.completed_at}
-								<span class="text-[10px] text-gray-600">{formatTaskDate(lastTask.completed_at)}</span>
-							{/if}
+							<span class="text-[10px] text-gray-600">
+								{formatRelativeTime(lastTask.completed_at || lastTask.started_at || lastTask.created_at)}
+							</span>
 						</div>
 					{:else}
-						<div class="text-xs text-gray-600 uppercase tracking-widest font-bold">IDLE</div>
+						<div class="text-xs text-gray-600 uppercase tracking-widest font-bold">No tasks yet</div>
+					{/if}
+					{#if outcome.completed + outcome.failed + outcome.pending > 0}
+						<div class="flex items-center gap-3 mt-2 text-[10px] font-mono">
+							<span class="text-green-500" title="Completed tasks">✓ {outcome.completed}</span>
+							<span class="text-red-500" title="Failed tasks">✕ {outcome.failed}</span>
+							{#if outcome.pending > 0}
+								<span class="text-gray-400" title="Pending / running tasks">· {outcome.pending} open</span>
+							{/if}
+						</div>
 					{/if}
 			</button>
 
 				<div class="px-4 pb-4 border-t border-[#222]">
-					<div class="pt-3">
-						<label class="block text-[10px] text-gray-500 uppercase tracking-wider mb-1" for={modelSelectId(agent.id)}>
-							Model
-						</label>
-						<select
-							id={modelSelectId(agent.id)}
-							class={`terminal-select ${accentBorderClass($agentHubSettings.accent)}`}
-							value={selectedModelValue(agent)}
-							on:change={(event) => handleModelChange(agent, event)}
-							disabled={savingModelAgentId === agent.id}
-						>
-							{#each optionsForAgent(agent) as preset}
-								<option value={preset.key} disabled={!preset.enabled}>
-									{preset.label}{!preset.enabled ? ' (disabled)' : ''}
-								</option>
-							{/each}
-						</select>
-						{#if savingModelAgentId === agent.id}
-							<div class="mt-1 text-[10px] text-cyan-400 uppercase tracking-wider">Saving...</div>
-						{/if}
-							{#if modelErrors[agent.id]}
-								<div class="mt-1 text-[10px] text-red-400 flex items-center gap-2">
-									<span>{modelErrors[agent.id]}</span>
-									<button
-										type="button"
-										class="text-gray-500 hover:text-white"
-										aria-label="Clear model error"
-										on:click={() => clearModelError(agent.id)}
-									>
-										Clear
-									</button>
-								</div>
-							{/if}
+					<div class="pt-3 space-y-1">
+						<div class="text-[10px] text-gray-500">
+							<span class="text-gray-400 font-mono">{agent.modelLabel}</span>
+							<a
+								href="/agents?tab=routing"
+								class="block text-[10px] text-gray-600 hover:text-cyan-300 transition-colors"
+							>
+								set in Routing &amp; Fallbacks
+							</a>
 						</div>
+						<button
+							type="button"
+							class="mt-1 w-full text-left text-[10px] uppercase tracking-widest text-gray-500 hover:text-cyan-300 transition-colors"
+							on:click={() => openAgentDetail(agent.id)}
+						>
+							Details / docs
+						</button>
 					</div>
 				</div>
+			</div>
 			{/each}
 		</div>
 
@@ -1455,11 +1489,13 @@
 			</div>
 			<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
 				{#each strategyDeveloperCards as agent (agent.id)}
-					{@const lastTask = getAgentLastTask(agent.id)}
+					{@const lastTask = latestTaskForAgent(agent.id)}
+					{@const liveStatus = agentLiveStatus(agent.id)}
+					{@const outcome = agentOutcomeSummary(agent.id)}
 					{@const canRemove = !protectedAgentIds.has(agent.id)}
 					{@const isEditing = editingAgentId === agent.id}
 					<div
-						class={`bg-[#111] border border-[#333] border-l-2 rounded-lg relative overflow-visible ${statusColor(lastTask?.status).split(' ')[0]}`}
+						class={`bg-[#111] border border-[#333] border-l-2 rounded-lg relative overflow-visible ${liveStatusColor(liveStatus).split(' ')[0]}`}
 					>
 						<div class={`${$agentHubSettings.compactCards ? 'p-2' : 'p-4'}`}>
 							<div class="flex items-center gap-2 text-sm text-gray-200 mb-2">
@@ -1531,20 +1567,6 @@
 										/>
 									</label>
 									<label class="block text-[10px] text-gray-500 uppercase tracking-wider">
-										Model
-										<select
-											class={`terminal-select mt-1 ${accentBorderClass($agentHubSettings.accent)}`}
-											bind:value={editDraftModelKey}
-											disabled={editSavingId === agent.id}
-										>
-											{#each optionsForAgent(agent) as preset}
-												<option value={preset.key} disabled={!preset.enabled}>
-													{preset.label}{!preset.enabled ? ' (disabled)' : ''}
-												</option>
-											{/each}
-										</select>
-									</label>
-									<label class="block text-[10px] text-gray-500 uppercase tracking-wider">
 										Instructions
 										<textarea
 											class="terminal-input mt-1 w-full text-xs font-mono"
@@ -1576,63 +1598,58 @@
 									</div>
 								</form>
 							{/if}
-							<button
-								type="button"
-								class="w-full text-left text-[10px] uppercase tracking-widest text-gray-500 hover:text-gray-300"
-								on:click={() => handleOpenAgent(agent.id)}
-							>
-								Open terminal
-							</button>
+							<div class="flex items-center gap-2 mb-1">
+								<span class={`text-[10px] px-1.5 py-0.5 rounded border ${liveStatusColor(liveStatus)} uppercase font-bold tracking-wider`}>
+									{liveStatus}
+								</span>
+								{#if outcome.completed + outcome.failed + outcome.pending > 0}
+									<span class="text-[10px] font-mono text-green-500" title="Completed tasks">✓ {outcome.completed}</span>
+									<span class="text-[10px] font-mono text-red-500" title="Failed tasks">✕ {outcome.failed}</span>
+									{#if outcome.pending > 0}
+										<span class="text-[10px] font-mono text-gray-400" title="Pending / running tasks">· {outcome.pending} open</span>
+									{/if}
+								{/if}
+							</div>
 							{#if lastTask}
-								<div class="text-xs text-gray-300 truncate mt-2" title={lastTask.title || lastTask.type}>
+								<div class="text-[10px] text-gray-600 uppercase tracking-widest">Last task</div>
+								<div class="text-xs text-gray-300 truncate" title={lastTask.title || lastTask.type}>
 									{lastTask.title || lastTask.type}
 								</div>
 								<div class="flex items-center gap-2 mt-1">
 									<span class={`text-[10px] px-1.5 py-0.5 rounded border ${statusColor(lastTask.status ?? 'pending')} uppercase font-bold tracking-wider`}>
 										{lastTask.status ?? 'pending'}
 									</span>
-									{#if lastTask.completed_at}
-										<span class="text-[10px] text-gray-600">{formatTaskDate(lastTask.completed_at)}</span>
-									{/if}
+									<span class="text-[10px] text-gray-600">
+										{formatRelativeTime(lastTask.completed_at || lastTask.started_at || lastTask.created_at)}
+									</span>
 								</div>
 							{:else}
-								<div class="text-xs text-gray-600 uppercase tracking-widest font-bold mt-2">IDLE</div>
+								<div class="text-xs text-gray-600 uppercase tracking-widest font-bold">No tasks yet</div>
 							{/if}
+							<button
+								type="button"
+								class="w-full text-left text-[10px] uppercase tracking-widest text-gray-500 hover:text-gray-300 mt-2"
+								on:click={() => handleOpenAgent(agent.id)}
+							>
+								Open terminal
+							</button>
+							<button
+								type="button"
+								class="w-full text-left text-[10px] uppercase tracking-widest text-gray-500 hover:text-cyan-300"
+								on:click={() => openAgentDetail(agent.id)}
+							>
+								Details / docs
+							</button>
 						</div>
 						<div class="px-4 pb-4 border-t border-[#222]">
-							<div class="pt-3">
-								<label class="block text-[10px] text-gray-500 uppercase tracking-wider mb-1" for={modelSelectId(agent.id)}>
-									Model
-								</label>
-								<select
-									id={modelSelectId(agent.id)}
-									class={`terminal-select ${accentBorderClass($agentHubSettings.accent)}`}
-									value={selectedModelValue(agent)}
-									on:change={(event) => handleModelChange(agent, event)}
-									disabled={savingModelAgentId === agent.id}
+							<div class="pt-3 text-[10px] text-gray-500">
+								<span class="text-gray-400 font-mono">{agent.modelLabel}</span>
+								<a
+									href="/agents?tab=routing"
+									class="block text-[10px] text-gray-600 hover:text-cyan-300 transition-colors"
 								>
-									{#each optionsForAgent(agent) as preset}
-										<option value={preset.key} disabled={!preset.enabled}>
-											{preset.label}{!preset.enabled ? ' (disabled)' : ''}
-										</option>
-									{/each}
-								</select>
-								{#if savingModelAgentId === agent.id}
-									<div class="mt-1 text-[10px] text-cyan-400 uppercase tracking-wider">Saving...</div>
-								{/if}
-								{#if modelErrors[agent.id]}
-									<div class="mt-1 text-[10px] text-red-400 flex items-center gap-2">
-										<span>{modelErrors[agent.id]}</span>
-										<button
-											type="button"
-											class="text-gray-500 hover:text-white"
-											aria-label="Clear model error"
-											on:click={() => clearModelError(agent.id)}
-										>
-											Clear
-										</button>
-									</div>
-								{/if}
+									set in Routing &amp; Fallbacks
+								</a>
 							</div>
 						</div>
 					</div>
@@ -1657,21 +1674,10 @@
 								autofocus
 							/>
 						</label>
-						<label class="block text-[10px] text-gray-500 uppercase tracking-wider" for="new-dev-model">
-							Model
-							<select
-								id="new-dev-model"
-								class={`terminal-select mt-1 ${accentBorderClass($agentHubSettings.accent)}`}
-								bind:value={newDeveloperModelKey}
-								disabled={submittingDeveloper}
-							>
-								{#each modelPresets as preset}
-									<option value={preset.key} disabled={!preset.enabled}>
-										{preset.label}{!preset.enabled ? ' (disabled)' : ''}
-									</option>
-								{/each}
-							</select>
-						</label>
+						<p class="text-[10px] text-gray-600">
+							Model defaults on creation — set it afterward in
+							<span class="text-cyan-300">Routing &amp; Fallbacks</span>.
+						</p>
 						{#if addDeveloperError}
 							<div class="text-[10px] text-red-400">{addDeveloperError}</div>
 						{/if}
@@ -1709,77 +1715,73 @@
 			</div>
 		</section>
 
-		<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-		<div class="bg-[#111] border border-[#333] rounded-lg p-4">
-			<div class="text-xs text-gray-500 uppercase tracking-wider mb-1">Tasks Today</div>
-			<div class="text-2xl font-bold text-green-400">{kpiTasksCompletedToday}</div>
-		</div>
-			<div class="bg-[#111] border border-[#333] rounded-lg p-4">
-				<div class="text-xs text-gray-500 uppercase tracking-wider mb-1 flex items-center justify-between gap-2">
-					<span>Errors</span>
+		<!-- Compact roster summary (replaces the four removed KPI tiles). -->
+		<div class="flex flex-wrap items-center gap-x-5 gap-y-2 bg-[#111] border border-[#333] rounded-lg px-4 py-3 text-xs">
+			<span class="flex items-center gap-1.5">
+				<span class="text-gray-500 uppercase tracking-wider">Running</span>
+				<span class="font-bold text-yellow-400">{rosterRunningCount}</span>
+			</span>
+			<span class="flex items-center gap-1.5">
+				<span class="text-gray-500 uppercase tracking-wider">Idle</span>
+				<span class="font-bold text-gray-300">{rosterIdleCount}</span>
+			</span>
+			<span class="flex items-center gap-1.5">
+				<span class="text-gray-500 uppercase tracking-wider">Pending backlog</span>
+				<span class="font-bold text-cyan-400">{rosterPendingBacklog}</span>
+			</span>
+			<span class="flex items-center gap-1.5">
+				<span class="text-gray-500 uppercase tracking-wider">Errors</span>
+				<span class="font-bold text-red-500">{rosterErrorCount}</span>
+				{#if rosterErrorCount > 0}
 					<button
 						type="button"
-						class="text-[10px] text-red-300 hover:text-red-200 disabled:opacity-50"
+						class="ml-1 text-[10px] text-red-300 hover:text-red-200 underline decoration-dotted disabled:opacity-50"
 						on:click={clearAllTaskAlerts}
 						disabled={clearingTaskErrors}
 					>
-						{clearingTaskErrors ? 'Clearing...' : 'Clear Errors'}
+						{clearingTaskErrors ? 'Clearing...' : 'Clear'}
 					</button>
-				</div>
-				<div class="text-2xl font-bold text-red-500">{kpiTasksErroredToday}</div>
-			</div>
-		<div class="bg-[#111] border border-[#333] rounded-lg p-4">
-			<div class="text-xs text-gray-500 uppercase tracking-wider mb-1">Active Agents</div>
-			<div class="text-2xl font-bold text-cyan-400">{kpiActiveAgents}</div>
+				{/if}
+			</span>
 		</div>
-		<div class="bg-[#111] border border-[#333] rounded-lg p-4">
-			<div class="text-xs text-gray-500 uppercase tracking-wider mb-1">Jobs Due 1h</div>
-			<div class="text-2xl font-bold text-amber-400">{kpiJobsDueNextHour}</div>
-		</div>
-	</div>
 
-	<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-		<TaskQueuePanel
-			tasks={agentTasks}
-			visibleCount={$agentHubSettings.taskQueueCount}
-			dateFormat={$agentHubSettings.dateFormat}
-			accentColor={$agentHubSettings.accent}
-			agentNamesById={agentNamesById}
-			onAgentClick={handleOpenAgent}
-			onDismissTask={dismissTaskAlert}
+	<!-- Task queue (the scheduler editor now lives in the Schedules tab to avoid a duplicate). -->
+	<TaskQueuePanel
+		tasks={agentTasks}
+		visibleCount={$agentHubSettings.taskQueueCount}
+		dateFormat={$agentHubSettings.dateFormat}
+		accentColor={$agentHubSettings.accent}
+		agentNamesById={agentNamesById}
+		onAgentClick={handleOpenAgent}
+		onDismissTask={dismissTaskAlert}
+	/>
+	{/if}
+
+	{#if activeTab === 'providers'}
+		<ProvidersTab />
+	{:else if activeTab === 'models'}
+		<ModelsTab onDirtyChange={(d) => (modelsDirty = d)} />
+	{:else if activeTab === 'routing'}
+		<RoutingTab onDirtyChange={(d) => (routingDirty = d)} />
+	{:else if activeTab === 'schedules'}
+		<SchedulesTab
+			jobs={schedulerJobs}
+			onSave={handleSchedulerSave}
+			showErrors={$agentHubSettings.showSchedulerErrors}
+			loading={loading}
 		/>
-
-		<div class="bg-[#111] border border-[#333] rounded-lg flex flex-col">
-			<div class="px-4 py-3 border-b border-[#333]">
-				<h3 class="font-bold text-sm text-gray-300 uppercase tracking-wider">Scheduler Jobs</h3>
-			</div>
-			<div class="overflow-x-auto">
-				<table class="w-full text-left text-xs">
-					<thead>
-						<tr class="border-b border-[#222] text-gray-500 uppercase tracking-wider">
-							<th class="px-4 py-2 font-medium">Name</th>
-							<th class="px-4 py-2 font-medium">Schedule</th>
-							<th class="px-4 py-2 font-medium">Next Run</th>
-							<th class="px-4 py-2 font-medium">Status</th>
-							<th class="px-4 py-2 font-medium">Enabled</th>
-						</tr>
-					</thead>
-					<tbody class="divide-y divide-[#222]">
-						{#each schedulerJobs as job}
-							<SchedulerJobRow
-								job={job}
-								onSave={handleSchedulerSave}
-								showErrors={$agentHubSettings.showSchedulerErrors}
-							/>
-						{:else}
-							<tr><td colspan="5" class="px-4 py-4 text-center text-gray-500">No jobs configured</td></tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-		</div>
-	</div>
+	{:else if activeTab === 'health'}
+		<HealthTab />
+	{/if}
 </div>
+
+{#if detailAgent}
+	<AgentDetailDrawer
+		agent={detailAgent}
+		on:close={closeAgentDetail}
+		on:saved={handleAgentDetailSaved}
+	/>
+{/if}
 
 {#if selectedAgent}
 	<div
@@ -1954,4 +1956,38 @@
 
 {#if showSettings}
 	<AgentSettingsDrawer settings={agentHubSettings} on:close={() => (showSettings = false)} />
+{/if}
+
+{#if leavePromptOpen}
+	<div
+		class="fixed inset-0 z-[110] flex items-center justify-center bg-black/70 p-4"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="agents-leave-title"
+	>
+		<div class="w-full max-w-md rounded border border-[#333] bg-[#0a0a0a] p-5 space-y-4 shadow-xl">
+			<h2 id="agents-leave-title" class="text-base font-semibold text-white">
+				Discard unsaved changes?
+			</h2>
+			<p class="text-sm text-gray-400">
+				You have unsaved changes on this tab. Leaving this page will discard them.
+			</p>
+			<div class="flex justify-end gap-2">
+				<button
+					type="button"
+					on:click={cancelLeave}
+					class="px-3 py-1.5 rounded border border-[#333] text-sm text-gray-300 hover:bg-[#161616] focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500"
+				>
+					Stay on page
+				</button>
+				<button
+					type="button"
+					on:click={confirmLeave}
+					class="px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-white text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+				>
+					Discard &amp; leave
+				</button>
+			</div>
+		</div>
+	</div>
 {/if}

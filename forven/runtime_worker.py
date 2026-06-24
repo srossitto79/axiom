@@ -46,6 +46,13 @@ _BRAIN_RATE_LIMIT_BACKOFF_SECONDS = (60, 120, 300)
 _BRAIN_TRANSIENT_BACKOFF_SECONDS = (120, 300, 900)
 _MAX_BRAIN_PROVIDER_RETRIES = 3
 _BRAIN_TASK_TIMEOUT_SECONDS = 180
+# Brain keepalive: the Brain is driven by an agent-callback chain with no
+# periodic scheduler job, and a timed-out agent-callback cycle deliberately
+# SUPPRESSES its retry (to avoid replaying side-effecting tools). That can leave
+# the Brain with no pending work and nothing to re-arm it — stranding the whole
+# AI loop until a manual restart. If the Brain has been silent this long with
+# nothing queued, re-seed one fresh non-callback cycle.
+_BRAIN_KEEPALIVE_SECONDS = 900
 _AGENT_TASK_COMPLETION_GRACE_SECONDS = 0.2
 _AGENT_CALLBACK_OUTPUT_SNIPPET_CHARS = 1500
 _DEFAULT_COMPLETED_TASK_OUTPUT_SNIPPET_CHARS = 3000
@@ -1435,6 +1442,76 @@ def _maybe_pause_routine_on_credential_failure(
         log.exception("Failed to handle credential failure for task %s", (task or {}).get("id"))
 
 
+def _seconds_since_last_brain_cycle(conn) -> float | None:
+    """Seconds since the most recent brain_invoke (created/claimed/completed), or
+    None if there has never been one."""
+    row = conn.execute(
+        "SELECT MAX(COALESCE(completed_at, claimed_at, created_at)) AS t "
+        "FROM tasks WHERE type='brain_invoke'"
+    ).fetchone()
+    raw = row["t"] if row else None
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+    except Exception:
+        return None
+
+
+def ensure_brain_keepalive() -> bool:
+    """Re-seed a periodic brain cycle when the Brain has gone silent with nothing
+    pending, so a suppressed/failed callback can't permanently strand the loop.
+
+    Bounded cadence: if the configured model is chronically too slow each
+    keepalive cycle times out and is requeued/exhausted, after which another is
+    seeded at most once per ``_BRAIN_KEEPALIVE_SECONDS`` — no tight loop — and it
+    self-heals the moment the operator selects a workable model. Respects an
+    operator autonomy pause (won't auto-run the Brain when paused/manual).
+    Returns True if a keepalive cycle was enqueued.
+    """
+    try:
+        from forven.db import create_pending_task, get_db
+        from forven.system_pause import is_autonomy_paused
+
+        if is_autonomy_paused():
+            return False
+        with get_db() as conn:
+            pending = conn.execute(
+                "SELECT COUNT(*) AS n FROM tasks "
+                "WHERE type='brain_invoke' AND status NOT IN ('done','cancelled','failed')"
+            ).fetchone()["n"]
+            if pending:
+                return False  # work already queued/running — not stranded
+            idle = _seconds_since_last_brain_cycle(conn)
+            if idle is not None and idle < _BRAIN_KEEPALIVE_SECONDS:
+                return False
+            create_pending_task(
+                conn,
+                "brain_invoke",
+                {
+                    "source": "keepalive",
+                    "message": (
+                        "Periodic brain cycle (keepalive). The Brain went idle with no "
+                        "pending work; reassess current state and continue."
+                    ),
+                },
+                priority=0,
+                source="system",
+            )
+        log.warning(
+            "Brain keepalive: re-seeded a brain cycle after %.0fs of silence "
+            "(the callback chain had stalled).",
+            idle if idle is not None else -1.0,
+        )
+        return True
+    except Exception:
+        log.debug("Brain keepalive check failed", exc_info=True)
+        return False
+
+
 async def process_brain_tasks_once(limit: int | None = None) -> int:
     """Claim and execute one round of pending brain tasks."""
     from forven.ai import _is_rate_limit_exception, is_transient_provider_exception
@@ -1458,6 +1535,9 @@ async def process_brain_tasks_once(limit: int | None = None) -> int:
 
     claimed = [dict(row) for row in claim_pending_tasks("brain_invoke", limit=limit, priority=True)]
     if not claimed:
+        # Idle tick: re-seed a brain cycle if the loop has stalled (e.g. a
+        # timed-out callback suppressed its retry and left nothing pending).
+        ensure_brain_keepalive()
         return 0
 
     for task in claimed:

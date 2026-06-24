@@ -108,8 +108,10 @@ class TestOpenRouterProviderAdapter:
         prov = OpenAIProvider()
         assert prov._extra_headers() == {}
 
-    def test_factory_unknown_falls_back_to_openai(self):
-        """Unknown name still defaults to OpenAI (regression check)."""
-        prov = get_provider("does-not-exist")
-        assert isinstance(prov, OpenAIProvider)
-        assert not isinstance(prov, OpenRouterProvider)
+    def test_factory_unknown_raises(self):
+        """Unknown provider must fail closed (no silent default to OpenAI) — a
+        fail-open default could spend on a provider the operator never chose."""
+        import pytest
+
+        with pytest.raises(ValueError):
+            get_provider("does-not-exist")

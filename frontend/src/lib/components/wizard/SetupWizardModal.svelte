@@ -214,6 +214,15 @@
 							visibleSubsections={TRADING_SUBS_WIZARD}
 						/>
 					{:else if step.id === 'ai'}
+						<div class="mb-4 rounded border border-cyan-900 bg-cyan-950/30 px-4 py-3 text-sm text-cyan-100">
+							<p class="font-semibold text-cyan-200">💡 On a budget? Recommended: Google Gemini → <span class="font-mono">gemini-2.5-flash-lite</span></p>
+							<ul class="mt-2 space-y-1 text-xs text-cyan-100/90 list-disc pl-5">
+								<li>Cheapest model that reliably runs Forven's agents (~$0.10 / $0.40 per 1M input/output tokens) and has a <strong>free tier</strong> to try.</li>
+								<li>Supports the tool-calling and large context the agents need.</li>
+								<li><strong>Caveat:</strong> it trades some reasoning depth for cost. If strategy quality looks weak, step up to <span class="font-mono">gemini-2.5-flash</span> (still far cheaper than the pro/3.x models).</li>
+								<li><strong>Free tiers rate-limit hard</strong> (and can hit a project spend cap). For a continuous research loop, expect to add a small paid budget — see <a href="https://ai.studio/spend" target="_blank" rel="noopener" class="underline">ai.studio/spend</a>.</li>
+							</ul>
+						</div>
 						<SettingsAgents {settings} variant="wizard" />
 					{:else if step.id === 'notifications'}
 						<SettingsNotifications {settings} />

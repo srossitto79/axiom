@@ -75,6 +75,8 @@ def ai():
 def ai_ask(provider, prompt, model):
     """Quick one-shot AI call for testing."""
     from forven.ai import call_ai_sync
+    from forven.model_selection import ensure_enforcement_armed
+    ensure_enforcement_armed()
     result = call_ai_sync(provider=provider, prompt=prompt, model=model)
     click.echo(result)
 
@@ -770,6 +772,8 @@ def brain():
 def brain_invoke(provider, model):
     """Manually trigger the brain cycle."""
     from forven.brain import invoke_sync
+    from forven.model_selection import ensure_enforcement_armed
+    ensure_enforcement_armed()
     result = invoke_sync(provider=provider, model=model)
     click.echo(result)
 
@@ -780,6 +784,8 @@ def brain_invoke(provider, model):
 def brain_ask(question, provider):
     """Ask the brain a question (uses full context)."""
     from forven.brain import invoke_sync
+    from forven.model_selection import ensure_enforcement_armed
+    ensure_enforcement_armed()
     result = invoke_sync(message=question, provider=provider)
     click.echo(result)
 

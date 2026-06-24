@@ -52,24 +52,35 @@ async def run_daily_learning():
     prompt += "\nFormat the response strictly as markdown with a list of 'Lessons' and 'Pattern Observations'. Avoid fluff."
 
     try:
-        log.info("Calling AI to synthesize daily learning...")
-        # Await the coroutine natively
-        summary = await call_ai(
-            provider="openai",  # Let fallback chain handle offline models
-            model="gpt-4o-mini",
-            prompt=prompt,
-        )
-        
+        # Route via the operator's configured primary provider/model, NEVER a
+        # hardcoded provider, and with fallback=False so this unattended daily
+        # job can never walk a chain onto a model the operator did not select.
+        from forven.model_routing import get_primary_provider_model
+        from forven.model_selection import UnconfiguredRouteError
+
+        provider, model = get_primary_provider_model()
+        log.info("Calling AI to synthesize daily learning (%s/%s)...", provider, model)
+        try:
+            summary = await call_ai(
+                provider=provider,
+                model=model,
+                prompt=prompt,
+                fallback=False,
+            )
+        except UnconfiguredRouteError as exc:
+            log.warning("Skipping daily learning: no connected & selected LLM configured (%s)", exc)
+            return
+
         lesson_block = f"\n\n## Daily Review - {now.strftime('%Y-%m-%d')}\n{summary}\n"
         append_workspace("LESSONS.md", lesson_block)
-        
+
         # Post to Discord
         await post_daily_summary(summary)
-        
+
         # Store a chunk in ChromaDB representing today's structural takeaway
         store_hypothesis(f"daily-eval-{now.strftime('%Y-%m-%d')}", summary, {"source": "daily_learning"})
         log.info("Daily learning synthesis complete and persisted to memory.")
-        
+
     except Exception as exc:
         log.error("Failed to execute daily learning job: %s", exc)
 

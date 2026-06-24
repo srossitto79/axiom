@@ -33,6 +33,31 @@ _RATE_LIMIT_HINTS = (
     "quota exceeded",
     "insufficient_quota",
 )
+# A single request that exceeds the provider's per-minute token budget (HTTP
+# 413). This is NOT a transient rate-limit — waiting and retrying the same
+# request can never succeed because the request itself is too big. Providers
+# (e.g. Groq) often phrase it with "rate limit" wording, so it must be detected
+# and excluded from the retryable rate-limit class.
+_REQUEST_TOO_LARGE_HINTS = (
+    "request too large",
+    "reduce your message size",
+    "too large for model",
+    "request_too_large",
+)
+# PERSISTENT quota/billing exhaustion (spend cap, out of credits, monthly quota)
+# — distinct from a transient per-minute throttle. Retrying within minutes can
+# never help; the operator must raise the cap / add credits / switch provider.
+# These phrases are billing-specific so they won't match an ordinary 429.
+_QUOTA_EXHAUSTED_HINTS = (
+    "spend cap",
+    "spending cap",
+    "insufficient_quota",
+    "out of credits",
+    "credit balance",
+    "billing hard limit",
+    "exceeded your current quota",
+    "monthly spending",
+)
 _TRANSIENT_PROVIDER_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 _TRANSIENT_PROVIDER_HINTS = (
     "connecttimeout",
@@ -135,6 +160,12 @@ ENDPOINTS = {
     "minimax": "https://api.minimax.io/anthropic/v1/messages",
     "zai": "https://api.z.ai/api/paas/v4/chat/completions",
     "openrouter": "https://openrouter.ai/api/v1/chat/completions",
+    "groq": "https://api.groq.com/openai/v1/chat/completions",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    "cerebras": "https://api.cerebras.ai/v1/chat/completions",
+    "mistral": "https://api.mistral.ai/v1/chat/completions",
+    "xai": "https://api.x.ai/v1/chat/completions",
+    "together": "https://api.together.xyz/v1/chat/completions",
 }
 
 _PROVIDER_ALIAS = {
@@ -149,7 +180,8 @@ _PROVIDER_ALIAS = {
 }
 
 _KNOWN_PROVIDER_PREFIXES: frozenset[str] = frozenset({
-    "openai", "minimax", "lmstudio", "zai", "openrouter",
+    "openai", "minimax", "lmstudio", "zai", "openrouter", "groq", "gemini",
+    "cerebras", "mistral", "xai", "together",
     "codex", "openai-codex", "local", "lm-studio", "z.ai", "z-ai",
     "open-router", "open_router",
 })
@@ -478,6 +510,13 @@ def _message_mentions_rate_limit(text: str) -> bool:
 
 
 def _is_rate_limit_exception(error: Exception) -> bool:
+    # A 413 "request too large" is a capacity mismatch, not a transient
+    # throttle — retrying the identical request never succeeds. Exclude it so
+    # callers fall back to a higher-capacity provider / fail fast instead of
+    # requeuing with minute-scale backoffs.
+    if _is_request_too_large(error):
+        return False
+
     seen: set[int] = set()
     current: object | None = error
 
@@ -538,6 +577,46 @@ def _walk_exception_chain(error: Exception):
         seen.add(current_id)
         yield current
         current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+
+
+def _is_request_too_large(error: Exception) -> bool:
+    """True when a single request exceeds the provider's token/size budget (413).
+
+    Distinct from a retryable rate-limit: the request must be made smaller or
+    sent to a higher-capacity provider — retrying as-is can never succeed.
+    """
+    for node in _walk_exception_chain(error):
+        status = getattr(node, "status_code", None)
+        if status == 413:
+            return True
+        response = getattr(node, "response", None)
+        if response is not None and getattr(response, "status_code", None) == 413:
+            return True
+        try:
+            message = str(node).lower()
+        except Exception:
+            message = ""
+        if any(hint in message for hint in _REQUEST_TOO_LARGE_HINTS):
+            return True
+    return False
+
+
+def _is_quota_exhausted(error: Exception) -> bool:
+    """True for PERSISTENT quota/billing exhaustion (spend cap, out of credits).
+
+    Distinct from a transient per-minute rate-limit: retrying within minutes
+    won't help — the operator must raise the cap / add credits / switch
+    provider. Callers use this to apply a long backoff and a single actionable
+    alert instead of fast per-task retries.
+    """
+    for node in _walk_exception_chain(error):
+        try:
+            message = str(node).lower()
+        except Exception:
+            message = ""
+        if any(hint in message for hint in _QUOTA_EXHAUSTED_HINTS):
+            return True
+    return False
 
 
 def is_transient_provider_exception(error: Exception) -> bool:
@@ -647,6 +726,33 @@ def resolve_available_provider(preferred: str | None = None) -> str:
 
 
 # Fallback chains — ordered list of (provider, model) to try
+def _record_call_health(provider: str, error: Exception | None = None) -> None:
+    """Mirror an LLM call's outcome into the runtime provider-health store so
+    Brain/auxiliary failures (not just the agent runner) light the banner /
+    Discord critical instead of staying invisible."""
+    try:
+        from forven.provider_runtime_health import record_call_failure, record_provider_ok
+
+        if error is None:
+            record_provider_ok(provider)
+        else:
+            record_call_failure(provider, error)
+    except Exception:  # pragma: no cover — health recording must never break a call
+        pass
+
+
+def _record_fallback_event(primary: str, used: str) -> None:
+    """Surface a silent provider switch on the simple-completion path, loudly."""
+    try:
+        from forven.provider_runtime_health import record_provider_event
+
+        record_provider_event(
+            primary, "fallback", f"{primary} failed — recovered on {used}", fallback_to=used
+        )
+    except Exception:  # pragma: no cover
+        pass
+
+
 async def call_ai(
     provider: str,
     model: str | None = None,
@@ -658,11 +764,18 @@ async def call_ai(
     fallback: bool = True,
     response_schema: dict | None = None,
     response_schema_name: str = "structured_response",
+    route: list[tuple[str, str]] | None = None,
 ) -> str:
     """Call an AI provider and return the response text.
 
     If fallback=True (default), automatically tries the next provider
     in the fallback chain on failure.
+
+    ``route`` lets a caller pass an EXPLICIT ordered ``[(provider, model), ...]``
+    chain (e.g. a user-configured per-slot fallback list resolved via
+    ``model_selection.resolve_route``). When given, exactly that chain is tried
+    in order — no policy chain, no normalize defaults — so per-slot fallbacks
+    actually execute at runtime.
     """
     provider, model = normalize_provider_and_model(provider, model)
 
@@ -675,33 +788,49 @@ async def call_ai(
     if not messages:
         raise ValueError("Either messages or prompt must be provided")
 
-    if not fallback:
-        return await _call_single(
-            provider,
-            model,
-            messages,
-            max_tokens,
-            temperature,
-            system,
-            response_schema=response_schema,
-            response_schema_name=response_schema_name,
-        )
+    if route is not None:
+        # Execute exactly the caller-provided chain (already connected+selected).
+        chain = [
+            (str(p).strip().lower(), str(m).strip())
+            for p, m in route
+            if str(p).strip() and str(m).strip()
+        ]
+        if not chain:
+            raise ValueError("call_ai(route=...) given an empty route")
+    elif not fallback:
+        try:
+            result = await _call_single(
+                provider,
+                model,
+                messages,
+                max_tokens,
+                temperature,
+                system,
+                response_schema=response_schema,
+                response_schema_name=response_schema_name,
+            )
+        except Exception as e:
+            _record_call_health(provider, e)
+            raise
+        _record_call_health(provider)
+        return result
+    else:
+        # Try fallback chain for this provider
+        chain = get_fallback_chain(provider)
+        # If the requested model isn't the default, put (provider, model) first
+        requested = (provider, model)
+        if requested != chain[0]:
+            chain = [requested] + [entry for entry in chain if entry != requested]
 
-    # Try fallback chain for this provider
-    chain = get_fallback_chain(provider)
-    # If the requested model isn't the default, put (provider, model) first
-    requested = (provider, model)
-    if requested != chain[0]:
-        chain = [requested] + [entry for entry in chain if entry != requested]
-
-    # Drop providers with no credentials and guarantee a configured provider is
-    # reachable even if the policy chain omits it. Without this, a primary like
-    # 'anthropic' (no key) with chain [anthropic, openai] never reaches a
-    # configured 'minimax', so the whole call fails on a transient openai 429.
-    chain = _credentialed_chain(chain, requested)
+        # Drop providers with no credentials and guarantee a configured provider
+        # is reachable even if the policy chain omits it. Without this, a primary
+        # like 'anthropic' (no key) with chain [anthropic, openai] never reaches a
+        # configured 'minimax', so the whole call fails on a transient openai 429.
+        chain = _credentialed_chain(chain, requested)
 
     last_error: Exception | None = None
     last_rate_limit_error: Exception | None = None
+    primary_fb = chain[0][0] if chain else provider
     for i, (fb_provider, fb_model) in enumerate(chain):
         try:
             result = await _call_single(
@@ -714,8 +843,10 @@ async def call_ai(
                 response_schema=response_schema,
                 response_schema_name=response_schema_name,
             )
+            _record_call_health(fb_provider)
             if i > 0:
                 log.warning("Fallback succeeded: %s/%s (after %d failures)", fb_provider, fb_model, i)
+                _record_fallback_event(primary_fb, fb_provider)
             return result
         except Exception as e:
             last_error = e
@@ -729,6 +860,12 @@ async def call_ai(
                 (log.debug if unconfigured else log.warning)(
                     "Provider %s/%s failed: %s — trying fallback", fb_provider, fb_model, e
                 )
+                # Record a genuine mid-chain failure (rate-limit/quota/auth) against
+                # the provider that failed, matching the tool-call path's fidelity.
+                # Skip pure "provider not configured" noise (expected when an
+                # unconfigured provider sits ahead of a configured one in the chain).
+                if not unconfigured:
+                    _record_call_health(fb_provider, e)
                 # On a rate-limit, back off briefly before the next provider so
                 # we don't instantly hammer a chain that is broadly throttled.
                 # Respect Retry-After when the provider supplied it.
@@ -739,6 +876,7 @@ async def call_ai(
                 if _is_rate_limit_exception(e):
                     last_rate_limit_error = e
                 log.error("All providers in fallback chain failed. Last error: %s", e)
+                _record_call_health(fb_provider, e)
 
     if last_rate_limit_error is not None:
         raise last_rate_limit_error
@@ -752,6 +890,11 @@ async def _call_single(
     response_schema_name: str = "structured_response",
 ) -> str:
     """Call a single provider without fallback."""
+    # Spend-safety chokepoint: never issue a request for a (provider, model) the
+    # operator has not connected AND selected (no-op until enforcement is on).
+    from forven.model_selection import assert_callable
+
+    assert_callable(provider, model, slot=f"call_ai:{provider}")
     token = get_token(provider)
 
     if provider == "openai":
@@ -811,6 +954,21 @@ async def _call_single(
             response_schema_name=response_schema_name,
             endpoint=ENDPOINTS["openrouter"],
             provider_label="openrouter",
+        )
+    elif provider in ("groq", "gemini", "cerebras", "mistral", "xai", "together"):
+        # All expose OpenAI-compatible Chat Completions endpoints, so route
+        # through the shared OpenAI caller with the provider's endpoint/label.
+        return await _call_openai(
+            token,
+            model,
+            messages,
+            max_tokens,
+            temperature,
+            system,
+            response_schema=response_schema,
+            response_schema_name=response_schema_name,
+            endpoint=ENDPOINTS[provider],
+            provider_label=provider,
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")
@@ -1177,11 +1335,18 @@ def call_ai_sync(
     max_tokens: int = 4096,
     temperature: float = 0.7,
     system: str | None = None,
+    fallback: bool = True,
+    route: list[tuple[str, str]] | None = None,
 ) -> str:
-    """Synchronous wrapper for call_ai."""
+    """Synchronous wrapper for call_ai.
+
+    ``fallback`` is threaded through so autonomous callers can pass
+    ``fallback=False`` and never walk a chain onto a provider/model the operator
+    did not select. ``route`` passes an explicit per-slot fallback chain.
+    """
     import asyncio
     return asyncio.run(call_ai(
         provider=provider, model=model, messages=messages,
         prompt=prompt, max_tokens=max_tokens, temperature=temperature,
-        system=system,
+        system=system, fallback=fallback, route=route,
     ))

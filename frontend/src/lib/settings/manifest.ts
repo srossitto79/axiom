@@ -3,8 +3,6 @@ export type SettingsAreaId =
   | 'data'
   | 'lab'
   | 'trading'
-  | 'agents'
-  | 'models'
   | 'notifications'
   | 'system'
   | 'danger';
@@ -56,8 +54,6 @@ export const SETTINGS_AREAS: SettingsArea[] = [
   { id: 'data', label: 'Data', description: 'Local data engine, source priority, coverage, streaming, and retention.', deepLinks: [{ label: 'Data Manager', href: '/data' }] },
   { id: 'lab', label: 'Lab', description: 'Strategy research, pipeline gating, simulation, continuous testing.', deepLinks: [] },
   { id: 'trading', label: 'Trading', description: 'Exchange, mode, capital, risk, regime gating.', deepLinks: [] },
-  { id: 'agents', label: 'Agents', description: 'AI providers, model policy, personas, scheduler.', deepLinks: [] },
-  { id: 'models', label: 'Models', description: 'Auxiliary LLM picks for compression, recall, skill extraction, post-mortem.', deepLinks: [] },
   { id: 'notifications', label: 'Notifications', description: 'Discord transport, event subscriptions, delivery level.', deepLinks: [] },
   { id: 'system', label: 'System', description: 'API keys, remote engine, bot operations, health & telemetry.', deepLinks: [] },
   { id: 'danger', label: 'Danger Zone', description: 'Factory reset, credential purge.', deepLinks: [], danger: true },
@@ -84,12 +80,11 @@ export const SETTINGS_SUBSECTIONS: SettingsSubsection[] = [
   { id: 'lab-backtest-defaults', area: 'lab', label: 'Gauntlet defaults', description: 'Symbol, timeframe, fees, slippage, and duration used by ad-hoc Gauntlet runs.' },
   { id: 'lab-walkforward-defaults', area: 'lab', label: 'Walk-forward defaults', description: 'Number of train/test folds and the train ratio used by the walk-forward runner.' },
 
-  // Agents
-  { id: 'agents-providers', area: 'agents', label: 'AI providers', description: 'Provider credentials and OAuth state for OpenAI, Anthropic, Groq, etc.' },
-  // agents-personas, agents-documents, and agents-scheduler are roster-keyed
-  // (per-agent / per-job). They are rendered directly by SettingsAgents.svelte
-  // against the live /forven/agents and /forven/scheduler endpoints — NOT the
-  // flat settings blob — so they intentionally have no manifest entries.
+  // Agents / Models — moved to the dedicated Agents control page (/agents).
+  // Both areas now render a redirect card in the Settings shell; their former
+  // subsections (AI providers, model policy, personas, scheduler, auxiliary
+  // models, backup provider) live as tabs on /agents and have no manifest
+  // entries here.
 
   // Notifications
   { id: 'notif-discord', area: 'notifications', label: 'Discord transport', description: 'Bot token and webhook credentials for Discord.' },

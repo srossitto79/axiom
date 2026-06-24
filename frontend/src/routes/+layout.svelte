@@ -15,6 +15,7 @@
 	import LaunchBanner from '$lib/components/LaunchBanner.svelte';
 	import RiskDisclaimerBanner from '$lib/components/RiskDisclaimerBanner.svelte';
 	import AgentProviderBanner from '$lib/components/AgentProviderBanner.svelte';
+	import ConnectionHealthBanner from '$lib/components/ConnectionHealthBanner.svelte';
 	import UpdateBanner from '$lib/components/UpdateBanner.svelte';
 	import PositionAlertWidget from '$lib/components/PositionAlertWidget.svelte';
 	import AIChatPanel from '$lib/components/AIChatPanel.svelte';
@@ -261,6 +262,7 @@
 		<RiskDisclaimerBanner />
 		<UpdateBanner />
 		<AgentProviderBanner />
+		<ConnectionHealthBanner />
 		<LaunchBanner />
 		<GlobalControlStrip />
 		<div class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">

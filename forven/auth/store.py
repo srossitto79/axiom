@@ -20,7 +20,7 @@ log = logging.getLogger("forven.auth.store")
 
 LOCK_PATH = AUTH_FILE.with_suffix(".lock")
 REFRESH_BUFFER_MS = 5 * 60 * 1000  # 5 minutes before expiry
-_SUPPORTED_AUTH_PROVIDERS = {"openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek"}
+_SUPPORTED_AUTH_PROVIDERS = {"openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek", "groq", "gemini", "cerebras", "mistral", "xai", "together"}
 _AUTH_SECRET_FIELDS = {"access", "refresh", "token", "id_token", "api_key", "api_secret"}
 
 # Runtime-only marker attached to a profile whose ciphertext could not be
@@ -42,12 +42,24 @@ _ENV_ACCESS_TOKEN_KEYS = {
     "openrouter": ("OPENROUTER_API_KEY",),
     "anthropic": ("ANTHROPIC_API_KEY",),
     "deepseek": ("DEEPSEEK_API_KEY",),
+    "groq": ("GROQ_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "cerebras": ("CEREBRAS_API_KEY",),
+    "mistral": ("MISTRAL_API_KEY",),
+    "xai": ("XAI_API_KEY", "GROK_API_KEY"),
+    "together": ("TOGETHER_API_KEY", "TOGETHER_AI_API_KEY"),
 }
 _ENV_BASE_URL_KEYS = {
     "lmstudio": ("LMSTUDIO_BASE_URL",),
     "zai": ("ZAI_BASE_URL", "ANTHROPIC_BASE_URL"),
     "anthropic": ("ANTHROPIC_BASE_URL",),
     "deepseek": ("DEEPSEEK_BASE_URL",),
+    "groq": ("GROQ_BASE_URL",),
+    "gemini": ("GEMINI_BASE_URL",),
+    "cerebras": ("CEREBRAS_BASE_URL",),
+    "mistral": ("MISTRAL_BASE_URL",),
+    "xai": ("XAI_BASE_URL",),
+    "together": ("TOGETHER_BASE_URL",),
 }
 
 

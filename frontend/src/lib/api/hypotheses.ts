@@ -347,7 +347,7 @@ export async function bulkRestoreHypotheses(ids: string[]): Promise<HypothesisBu
 	});
 }
 
-export type UrlSourceType = 'youtube' | 'reddit' | 'github' | 'blog' | 'forum';
+export type UrlSourceType = 'youtube' | 'reddit' | 'github' | 'blog' | 'forum' | 'podcast';
 
 export interface UrlPreviewSuccess {
 	ok: true;
@@ -404,6 +404,55 @@ export type CreateFromUrlResponse = CreateFromUrlSuccess | CreateFromUrlFailure;
 
 export async function createHypothesisFromUrl(body: CreateFromUrlRequest): Promise<CreateFromUrlResponse> {
 	return fetchApi('/hypotheses/from_url', {
+		method: 'POST',
+		body: JSON.stringify(body),
+	});
+}
+
+export interface CreateFromUrlsRequest {
+	urls: string[];
+	title?: string;
+	market_thesis?: string;
+	mechanism?: string;
+	claimed_edge?: string;
+}
+
+/** Per-URL outcome echoed back by the combine endpoint. */
+export interface UrlSourceResult {
+	url: string;
+	ok: boolean;
+	source_type?: UrlSourceType | null;
+	title?: string;
+	content_bytes?: number;
+	error_code?: string;
+	error?: string;
+}
+
+export interface CreateFromUrlsSuccess {
+	ok: true;
+	hypothesis: HypothesisSummary & {
+		market_thesis: string;
+		mechanism: string;
+	};
+	task?: { task_id: number | null; error?: string } | null;
+	sources: UrlSourceResult[];
+	research_deferred?: boolean;
+}
+
+export interface CreateFromUrlsFailure {
+	ok: false;
+	error_code: string;
+	error: string;
+	sources?: UrlSourceResult[];
+}
+
+export type CreateFromUrlsResponse = CreateFromUrlsSuccess | CreateFromUrlsFailure;
+
+/** Combine several source URLs into a single crucible (one per all sources). */
+export async function createHypothesisFromUrls(
+	body: CreateFromUrlsRequest,
+): Promise<CreateFromUrlsResponse> {
+	return fetchApi('/hypotheses/from_urls', {
 		method: 'POST',
 		body: JSON.stringify(body),
 	});
