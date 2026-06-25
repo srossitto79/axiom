@@ -1028,9 +1028,10 @@ def get_data_health():
 def _probe_lan_health() -> list[dict]:
     """Probe the LAN metrics API and return per-category stream health entries.
 
-    Makes ONE call to /metrics/latest and splits the freshest rows into four
-    category rows: lan_onchain, lan_orderbook, lan_liquidations, lan_sentiment.
-    Falls back to 'recovering' (cache exists) or 'down' on connection failure.
+    Makes ONE call to /assets/bitcoin/metrics and splits the latest metric
+    timestamps into four category rows: lan_onchain, lan_orderbook,
+    lan_liquidations, lan_sentiment. Falls back to 'recovering' (cache exists)
+    or 'down' on connection failure.
     """
     import os
     from collections.abc import Callable
@@ -1084,9 +1085,9 @@ def _probe_lan_health() -> list[dict]:
             return None
 
     try:
-        r = _requests.get(f"{base_url}/metrics/latest", params={"assets": "bitcoin"}, timeout=5)
-        r.raise_for_status()
-        rows = r.json()
+        response = _requests.get(f"{base_url}/assets/bitcoin/metrics", timeout=5)
+        response.raise_for_status()
+        payload = response.json()
     except Exception as exc:
         status = "recovering" if _has_cache() else "down"
         error = str(exc)[:200]
@@ -1117,27 +1118,49 @@ def _probe_lan_health() -> list[dict]:
         except Exception:
             return None
 
-    def _collection_interval_seconds(row: dict) -> float:
+    def _collection_interval_seconds(value: object) -> float:
+        if isinstance(value, str):
+            text = value.strip().lower()
+            try:
+                if text.endswith("ms"):
+                    return float(text[:-2]) / 1000.0
+                if text.endswith("m"):
+                    return float(text[:-1]) * 60.0
+                if text.endswith("h"):
+                    return float(text[:-1]) * 3600.0
+                if text.endswith("d"):
+                    return float(text[:-1]) * 86400.0
+                return float(text)
+            except ValueError:
+                return 3600.0
         try:
-            return float(row.get("collection_interval") or row.get("interval_seconds") or 3600)
+            return float(value or 3600)
         except (TypeError, ValueError):
             return 3600.0
+
+    if isinstance(payload, dict):
+        raw_rows = payload.get("metrics")
+    else:
+        raw_rows = payload
+    rows = raw_rows if isinstance(raw_rows, list) else []
 
     category_rows: dict[str, list[tuple[str, datetime, bool]]] = {
         name: [] for name, _ in _LAN_CATEGORIES
     }
-    for row in rows if isinstance(rows, list) else []:
+    for row in rows:
         if not isinstance(row, dict):
             continue
-        metric = str(row.get("metric") or row.get("name") or "")
+        metric = str(row.get("metric") or row.get("metric_name") or row.get("name") or "")
         if not metric or metric in _SKIP_COLS:
             continue
-        if row.get("value") is None:
-            continue
-        metric_dt = _parse_metric_dt(row.get("datetime") or row.get("timestamp"))
+        metric_dt = _parse_metric_dt(
+            row.get("datetime") or row.get("timestamp") or row.get("max_date") or row.get("last_timestamp")
+        )
         if metric_dt is None:
             continue
-        interval_s = _collection_interval_seconds(row)
+        interval_s = _collection_interval_seconds(
+            row.get("collection_interval") or row.get("interval_seconds")
+        )
         is_fresh = (now - metric_dt) <= timedelta(seconds=interval_s * _MAX_STALENESS_MULT)
         for stream_name, matcher in _LAN_CATEGORIES:
             if matcher(metric):

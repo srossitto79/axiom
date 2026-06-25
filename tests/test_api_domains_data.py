@@ -7,10 +7,13 @@ from forven.api_domains import data as data_domain
 
 
 class _LanHealthResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, error: Exception | None = None):
         self._payload = payload
+        self._error = error
 
     def raise_for_status(self):
+        if self._error is not None:
+            raise self._error
         return None
 
     def json(self):
@@ -112,34 +115,32 @@ def test_get_data_health_includes_stream_freshness(monkeypatch):
 
 def test_probe_lan_health_uses_latest_rows_and_liquidation_names(monkeypatch):
     def fake_get(url, **kwargs):
-        assert url.endswith("/metrics/latest")
-        assert kwargs["params"] == {"assets": "bitcoin"}
-        return _LanHealthResponse([
-            {
-                "metric": "long_liq_usd",
-                "datetime": data_domain.datetime.now(data_domain.timezone.utc).isoformat(),
-                "collection_interval": 3600,
-                "value": 123,
-            },
-            {
-                "metric": "short_liq_usd",
-                "datetime": data_domain.datetime.now(data_domain.timezone.utc).isoformat(),
-                "collection_interval": 3600,
-                "value": 456,
-            },
-            {
-                "metric": "l2_bid_depth",
-                "datetime": data_domain.datetime.now(data_domain.timezone.utc).isoformat(),
-                "collection_interval": 3600,
-                "value": 1,
-            },
-            {
-                "metric": "active_addresses",
-                "datetime": data_domain.datetime.now(data_domain.timezone.utc).isoformat(),
-                "collection_interval": 3600,
-                "value": 1,
-            },
-        ])
+        assert url.endswith("/assets/bitcoin/metrics")
+        return _LanHealthResponse({
+            "asset": "bitcoin",
+            "metrics": [
+                {
+                    "metric_name": "long_liq_usd",
+                    "max_date": data_domain.datetime.now(data_domain.timezone.utc).isoformat(),
+                    "collection_interval": "1h",
+                },
+                {
+                    "metric_name": "short_liq_usd",
+                    "max_date": data_domain.datetime.now(data_domain.timezone.utc).isoformat(),
+                    "collection_interval": "1h",
+                },
+                {
+                    "metric_name": "l2_bid_depth",
+                    "max_date": data_domain.datetime.now(data_domain.timezone.utc).isoformat(),
+                    "collection_interval": "1h",
+                },
+                {
+                    "metric_name": "active_addresses",
+                    "max_date": data_domain.datetime.now(data_domain.timezone.utc).isoformat(),
+                    "collection_interval": "1h",
+                },
+            ],
+        })
 
     monkeypatch.setattr("requests.get", fake_get)
 
@@ -154,14 +155,16 @@ def test_probe_lan_health_uses_latest_rows_and_liquidation_names(monkeypatch):
 
 def test_probe_lan_health_marks_stale_latest_rows_recovering(monkeypatch):
     def fake_get(url, **kwargs):
-        return _LanHealthResponse([
-            {
-                "metric": "news_sentiment",
-                "datetime": "2000-01-01T00:00:00+00:00",
-                "collection_interval": 3600,
-                "value": 0.2,
-            },
-        ])
+        return _LanHealthResponse({
+            "asset": "bitcoin",
+            "metrics": [
+                {
+                    "metric_name": "news_sentiment",
+                    "max_date": "2000-01-01T00:00:00+00:00",
+                    "collection_interval": "1h",
+                },
+            ],
+        })
 
     monkeypatch.setattr("requests.get", fake_get)
 
