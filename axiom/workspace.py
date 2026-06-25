@@ -83,6 +83,58 @@ CORE_FILES = [
     "evolution_journal.md",
 ]
 
+# evolution_journal.md is intentionally excluded: it is an append-only
+# operator/agent log, not a template, and must never be force-overwritten by a
+# template sync. It is still seeded once by _create_defaults() when absent.
+WORKSPACE_TEMPLATE_FILES = (
+    "SOUL.md",
+    "IDENTITY.md",
+    "USER.md",
+    "AGENTS.md",
+    "TOOLS.md",
+    "DATA_SCHEMA.md",
+    "HEARTBEAT.md",
+    "BACKUPS.md",
+    "LESSONS.md",
+)
+
+_LEGACY_TEXT_REPLACEMENTS = {
+    "SOUL.md": (
+        (
+            '**You ARE Axiom.** Don\'t talk about "reading files", "sessions", '
+            '"context windows", "system prompts", or "tokens". You simply know '
+            "things because you are Axiom. If something isn't in front of you, "
+            'say "I\'m not sure" naturally — never "I don\'t have access to that."'
+        ),
+        (
+            "**You ARE Axiom.** Don't expose prompt/context/session/token mechanics "
+            "unless the operator explicitly asks about system internals. If something "
+            "is not available or not grounded in current data, say what is unknown "
+            "plainly and use the available tools or records before guessing."
+        ),
+    ),
+}
+
+_LEGACY_AGENTS_INSERTIONS = (
+    (
+        "- Learned a lesson → update `LESSONS.md`. Made a mistake → document it so future-you doesn't repeat it.",
+        (
+            "- Learned a lesson → update `LESSONS.md`. Made a mistake → document it so future-you "
+            "doesn't repeat it.\n"
+            "- Do not edit `SOUL.md`, `AGENTS.md`, `USER.md`, or per-agent identity files unless "
+            "the operator explicitly asks for identity/policy changes."
+        ),
+    ),
+    (
+        "- Don't run destructive commands without asking. When genuinely in doubt, ask.",
+        (
+            "- Don't run destructive commands without asking. When genuinely in doubt, ask.\n"
+            "- It is acceptable to mention records, tools, or files when that makes the work "
+            "auditable; do not expose prompt/session/token mechanics."
+        ),
+    ),
+)
+
 
 def read_workspace(filename: str, optional: bool = False) -> str | None:
     """Read a workspace file. Returns None if optional and missing."""
@@ -170,6 +222,182 @@ def append_workspace(filename: str, content: str):
             _append(LEGACY_WORKSPACE_DIR / filename)
         except Exception:
             pass
+
+
+def _template_dir() -> Path:
+    return Path(__file__).parent.parent / "templates" / "workspace"
+
+
+def _read_template(filename: str) -> str | None:
+    path = _template_dir() / filename
+    try:
+        if path.exists():
+            return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return None
+
+
+def _strip_legacy_lessons_incident(text: str) -> tuple[str, bool]:
+    marker = "# S50209 Review Summary (March 27, 2026)"
+    idx = text.find(marker)
+    if idx == -1:
+        return text, False
+    return text[:idx].rstrip() + "\n", True
+
+
+def _safe_template_transform(filename: str, text: str) -> tuple[str, list[str]]:
+    """Apply narrow non-clobbering migrations to existing workspace docs."""
+    changes: list[str] = []
+    updated = text
+
+    replacement = _LEGACY_TEXT_REPLACEMENTS.get(filename)
+    if replacement:
+        old, new = replacement
+        if old in updated and new not in updated:
+            updated = updated.replace(old, new)
+            changes.append("updated legacy uncertainty wording")
+
+    if filename == "AGENTS.md":
+        for old, new in _LEGACY_AGENTS_INSERTIONS:
+            if old in updated and new not in updated:
+                updated = updated.replace(old, new)
+                changes.append("inserted identity-edit/auditability guard")
+
+    if filename == "LESSONS.md":
+        updated, stripped = _strip_legacy_lessons_incident(updated)
+        if stripped:
+            changes.append("removed stale duplicated S50209 incident")
+
+    return updated, changes
+
+
+def _sync_one_workspace_file(
+    root: Path,
+    filename: str,
+    *,
+    apply: bool,
+    force: bool,
+) -> dict[str, object]:
+    template = _read_template(filename)
+    target = root / filename
+    rel = str(filename)
+
+    if template is None:
+        return {"path": rel, "action": "missing_template"}
+
+    if not target.exists():
+        if apply:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(template, encoding="utf-8")
+        return {"path": rel, "action": "create"}
+
+    try:
+        current = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return {"path": rel, "action": "error", "error": str(exc)}
+
+    if current == template:
+        return {"path": rel, "action": "unchanged"}
+
+    if force:
+        if apply:
+            target.write_text(template, encoding="utf-8")
+        return {"path": rel, "action": "overwrite"}
+
+    transformed, changes = _safe_template_transform(filename, current)
+    if transformed != current:
+        if apply:
+            target.write_text(transformed, encoding="utf-8")
+        return {"path": rel, "action": "patch", "changes": changes}
+
+    return {"path": rel, "action": "skip_custom"}
+
+
+def _iter_agent_identity_files(root: Path) -> list[tuple[Path, str]]:
+    agents_root = root / "agents"
+    if not agents_root.exists():
+        return []
+    out: list[tuple[Path, str]] = []
+    for path in sorted(agents_root.glob("*/SOUL.md")):
+        out.append((path, "SOUL.md"))
+    for path in sorted(agents_root.glob("*/AGENTS.md")):
+        out.append((path, "AGENTS.md"))
+    return out
+
+
+def _sync_one_agent_identity_file(
+    path: Path,
+    template_name: str,
+    *,
+    apply: bool,
+    force: bool,
+    root: Path,
+) -> dict[str, object]:
+    rel = str(path.relative_to(root)).replace("\\", "/")
+    if not path.exists():
+        return {"path": rel, "action": "missing"}
+    try:
+        current = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return {"path": rel, "action": "error", "error": str(exc)}
+
+    if force:
+        return {"path": rel, "action": "skip_agent_force_unsupported"}
+
+    transformed, changes = _safe_template_transform(template_name, current)
+    if transformed != current:
+        if apply:
+            path.write_text(transformed, encoding="utf-8")
+        return {"path": rel, "action": "patch", "changes": changes}
+    return {"path": rel, "action": "skip_custom"}
+
+
+def sync_workspace_templates(
+    *,
+    apply: bool = False,
+    force: bool = False,
+    include_agents: bool = False,
+) -> dict[str, object]:
+    """Synchronize shipped prompt templates into the runtime workspace.
+
+    Default mode is a dry-run. Without ``force``, this only creates missing
+    files and applies narrow known-safe text migrations; customized files are
+    reported as ``skip_custom``. ``force`` overwrites full files and should be
+    used only after review.
+    """
+    ensure_dirs()
+    roots = _workspace_roots()
+    results: list[dict[str, object]] = []
+    for root in roots:
+        for filename in WORKSPACE_TEMPLATE_FILES:
+            item = _sync_one_workspace_file(root, filename, apply=apply, force=force)
+            item["root"] = str(root)
+            results.append(item)
+        if include_agents:
+            for path, template_name in _iter_agent_identity_files(root):
+                item = _sync_one_agent_identity_file(
+                    path,
+                    template_name,
+                    apply=apply,
+                    force=force,
+                    root=root,
+                )
+                item["root"] = str(root)
+                results.append(item)
+
+    summary: dict[str, int] = {}
+    for item in results:
+        action = str(item.get("action") or "unknown")
+        summary[action] = summary.get(action, 0) + 1
+    return {
+        "ok": True,
+        "apply": apply,
+        "force": force,
+        "include_agents": include_agents,
+        "summary": summary,
+        "results": results,
+    }
 
 
 def today_memory_path() -> str:
@@ -522,6 +750,7 @@ __all__ = [
     "read_operator_profile",
     "read_workspace",
     "safe_workspace_path",
+    "sync_workspace_templates",
     "today_memory_path",
     "write_operator_profile",
     "write_workspace",

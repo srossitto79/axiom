@@ -47,6 +47,7 @@ services:
     volumes:
       - axiom_data:/data
       - ./axiom:/app/axiom:cached
+      - ./templates:/app/templates:cached
 
     healthcheck:
       test: ["CMD-SHELL", "curl -fSs http://127.0.0.1:8003/api/health || exit 1"]
@@ -107,6 +108,7 @@ services:
     volumes:
       - axiom_data:/data
       - ./axiom:/app/axiom:cached
+      - ./templates:/app/templates:cached
 
     depends_on:
       backend:

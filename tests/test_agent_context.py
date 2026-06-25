@@ -13,8 +13,8 @@ def _make_read_workspace_mock(schema_content: str | None):
     return _mock
 
 
-def test_data_schema_injected_when_present():
-    """build_agent_context includes DATA SCHEMA section when DATA_SCHEMA.md exists."""
+def test_compact_data_schema_injected_when_present():
+    """build_agent_context includes bounded DATA SCHEMA guidance when DATA_SCHEMA.md exists."""
     schema = "## Core Columns\n- timestamp\n- close"
     with patch("axiom.context.read_workspace", side_effect=_make_read_workspace_mock(schema)):
         with patch("axiom.context._get_chroma_recall", return_value=""):
@@ -28,11 +28,18 @@ def test_data_schema_injected_when_present():
                     role_md="You are a quant researcher.",
                 )
     assert "# DATA SCHEMA" in result
-    assert "## Core Columns" in result
+    assert "Always-present OHLCV columns" in result
+    assert "Full reference remains in `DATA_SCHEMA.md`" in result
+    assert "## Core Columns" not in result
 
 
-def test_data_schema_absent_does_not_raise():
-    """build_agent_context works fine when DATA_SCHEMA.md is missing (optional=True)."""
+def test_data_schema_compact_block_present_even_when_file_absent():
+    """The compact schema (incl. the always-guard rule) is injected unconditionally.
+
+    The column-guard rule is the most important safety guidance for any agent that
+    writes strategy code, so it must reach workers even on a fresh workspace that has
+    not created DATA_SCHEMA.md yet.
+    """
     with patch("axiom.context.read_workspace", side_effect=_make_read_workspace_mock(None)):
         with patch("axiom.context._get_chroma_recall", return_value=""):
             # See first test for why we patch axiom.db.get_db and not Axiom.context.get_db
@@ -42,9 +49,49 @@ def test_data_schema_absent_does_not_raise():
                     agent_id="quant-researcher",
                     role_md="You are a quant researcher.",
                 )
-    assert "# DATA SCHEMA" not in result
+    assert "# DATA SCHEMA" in result
+    assert "if 'col' in df.columns" in result
     # Original role block still present
     assert "# YOUR ROLE" in result
+
+
+def test_build_agent_context_includes_compact_policy_blocks():
+    with patch("axiom.context.read_workspace", side_effect=_make_read_workspace_mock(None)):
+        with patch("axiom.context._get_chroma_recall", return_value=""):
+            with patch("axiom.db.get_db", side_effect=Exception("no db")):
+                from axiom.context import build_agent_context
+                result = build_agent_context(
+                    agent_id="risk-manager",
+                    role_md="You manage risk.",
+                )
+
+    assert "# EXTERNAL / UNTRUSTED CONTENT" in result
+    assert "# OPERATING RULES" in result
+    assert "# CURRENT RISK POLICY (enforced by code)" in result
+
+
+def test_build_agent_context_preserves_load_bearing_worker_rules():
+    """Guard the worker behavioral contract that replaced the full IDENTITY.md dump.
+
+    IDENTITY.md is no longer injected into worker context (only the compact blocks
+    are). These specific lines are the load-bearing pieces a worker acts on — if a
+    future edit drops them, fail here instead of silently shipping degraded agents.
+    """
+    with patch("axiom.context.read_workspace", side_effect=_make_read_workspace_mock(None)):
+        with patch("axiom.context._get_chroma_recall", return_value=""):
+            with patch("axiom.db.get_db", side_effect=Exception("no db")):
+                from axiom.context import build_agent_context
+                result = build_agent_context(
+                    agent_id="risk-manager",
+                    role_md="You manage risk.",
+                )
+
+    # Escalation mechanism must be named, not just implied.
+    assert "request_fix" in result
+    assert "Never silently retry or work around it" in result
+    # Active risk limits must be surfaced.
+    assert "Drawdown kill-switch" in result
+    assert "Max risk per trade" in result
 
 
 def test_build_agent_context_still_includes_chroma_recall_when_task_present():

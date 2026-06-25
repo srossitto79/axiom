@@ -3,6 +3,8 @@
 
 """axiom CLI — main entry point."""
 
+import json
+
 import click
 
 from axiom.config import ensure_dirs
@@ -191,6 +193,22 @@ def workspace_read(filename):
     from axiom.workspace import read_workspace
     content = read_workspace(filename)
     click.echo(content)
+
+
+@workspace.command("sync-templates")
+@click.option("--apply", "apply_changes", is_flag=True, help="Write planned safe changes")
+@click.option("--force", is_flag=True, help="Overwrite global workspace files from templates")
+@click.option("--include-agents", is_flag=True, help="Patch per-agent SOUL.md/AGENTS.md safe text")
+def workspace_sync_templates(apply_changes: bool, force: bool, include_agents: bool) -> None:
+    """Dry-run or apply safe workspace template updates."""
+    from axiom.workspace import sync_workspace_templates
+
+    result = sync_workspace_templates(
+        apply=apply_changes,
+        force=force,
+        include_agents=include_agents,
+    )
+    click.echo(json.dumps(result, indent=2))
 
 
 # --- Trades commands ---

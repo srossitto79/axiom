@@ -26,6 +26,9 @@ def test_build_research_context_excludes_chroma_by_default():
     )
 
     assert "# YOUR ROLE" in payload
+    assert "# EXTERNAL / UNTRUSTED CONTENT" in payload
+    assert "# OPERATING RULES" in payload
+    assert "# CURRENT RISK POLICY (enforced by code)" in payload
     assert "# CONSTRAINT MEMORY" in payload
     assert "Avoid leverage-sensitive setups." in payload
     assert "# DATASET INVENTORY" in payload
@@ -33,6 +36,32 @@ def test_build_research_context_excludes_chroma_by_default():
     assert "# RESEARCH CONTRACT" in payload
     assert "- Lane: exploration" in payload
     assert "CHROMA" not in payload.upper()
+
+
+def test_build_research_context_includes_compact_schema_when_workspace_schema_exists(monkeypatch):
+    from axiom.research_context import build_research_context
+
+    contract = build_research_contract(
+        lane="exploration",
+        settings=default_research_settings(),
+        available_datasets=["ohlcv"],
+    )
+
+    monkeypatch.setattr(
+        "axiom.research_context.read_workspace",
+        lambda filename, optional=False: "schema" if filename == "DATA_SCHEMA.md" else None,
+    )
+
+    payload = build_research_context(
+        agent_id="quant-researcher",
+        role_md="You are a quant researcher.",
+        task_description="Research funding dislocations",
+        contract=contract,
+        constraint_memory="Respect execution frictions.",
+    )
+
+    assert "# DATA SCHEMA (compact)" in payload
+    assert "Full reference remains in `DATA_SCHEMA.md`" in payload
 
 
 def test_build_research_context_renders_optional_inspiration_memory():
@@ -180,7 +209,7 @@ def test_run_agent_task_uses_research_context_for_research_tasks(AXIOM_db, monke
         calls.append(("research", contract.lane, list(contract.available_datasets)))
         return "research-context"
 
-    async def _fake_call_with_tools(provider, model_id, messages, system, tools=None):
+    async def _fake_call_with_tools(provider, model_id, messages, system, tools=None, **kwargs):
         calls.append(("call", system))
         return ("done", {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
 

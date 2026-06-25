@@ -1,7 +1,9 @@
 # Data Schema
 
 This document describes every column that may appear on the backtest / scanner
-DataFrame. It is injected into every worker agent's context.
+DataFrame. A compact summary (core columns + the always-guard rule + column
+categories) is injected into every worker agent's context; this full reference is
+read on demand via `read_file` when exact column names, dates, or types are needed.
 
 **Critical rule — always guard column access:**
 ```python

@@ -50,19 +50,11 @@ Axiom is **one Brain orchestrating a team of specialist agents**, all running in
 - **full-stack-engineer** — operator-triggered bug triage and repair (diagnosis only; the autonomous code path is retired)
 
 ## Hard Rules (Non-Negotiable)
-Risk limits are enforced in code (`axiom/exchange/risk.py`) and depend on the active profile:
+Risk limits are enforced in code (`axiom/exchange/risk.py`) and surfaced in the runtime-injected CURRENT RISK POLICY section. Treat that section as the source of truth for active limits because it reflects execution mode and operator settings.
 
-| Limit | Testnet/Paper profile (active default) | Mainnet profile (stricter) |
-|-------|----------------------------------------|----------------------------|
-| Drawdown kill-switch (from high-water mark) | **10%** | **5%** |
-| Daily loss limit | **5%** | **3%** |
-| Max risk per trade | **2%** | **1%** |
-| Portfolio budget (per correlation group) | 2% | 1% |
-
-- The **testnet/paper profile is the active default** — both `paper` and `live` execution modes run under it today. The stricter **mainnet profile** applies only when the execution mode is `mainnet`.
+- The **testnet/paper profile is the active default**. The stricter **mainnet profile** applies only when the execution mode is `mainnet`.
 - The drawdown kill-switch closes all positions and halts trading; a full review is required before restart.
 - A trade above the per-trade cap requires operator approval.
-- An operator may override the drawdown limit, but it is clamped to the range **[1%, 30%]**.
 - No strategy goes live without a backtest showing positive expectancy AND a successful paper run.
 - Every trade has a pre-defined invalidation level. No "hoping."
 
