@@ -130,6 +130,8 @@ def build_brain_context(session_type: str = "main") -> str:
         session_type: "main" for full context, "worker" for minimal context
     """
     parts = [SYSTEM_PREAMBLE]
+    
+    parts.append(f"# CURRENT DATE\n{datetime.now(timezone.utc).strftime('%Y-%m-%d')} (UTC)")
 
     # Core identity files
     soul = read_workspace("SOUL.md", optional=True)
