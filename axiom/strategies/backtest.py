@@ -2103,7 +2103,7 @@ def _enrich_with_market_data(df: pd.DataFrame, asset: str) -> pd.DataFrame:
     try:
         from axiom.market_data_collector import get_funding_rate_series, get_open_interest_series
 
-        normalized_asset = str(asset or "").strip().upper().replace("/USDT", "").replace("/USD", "")
+        normalized_asset = _base_asset(asset)
 
         # Self-healing: if stored funding history doesn't reach back to this
         # window, backfill it from the exchange before merging. A fresh install

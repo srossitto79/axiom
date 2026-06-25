@@ -592,7 +592,13 @@ def _tool_fetch_exchange_data(params: dict) -> str:
 
 @register_tool(
     name="get_local_ohlcv",
-    description="Read OHLCV bars from a local dataset. Use for data analysis and strategy ideation.",
+    description=(
+        "Read raw OHLCV bars (timestamp, open, high, low, close, volume ONLY) from the local parquet lake. "
+        "WARNING: enrichment columns such as funding_rate, open_interest, ls_ratio, etc. are NEVER present in these files — "
+        "they are joined at runtime by the backtest and scanner pipelines, not stored in parquet. "
+        "To verify what columns actually reach generate_signal(), run a backtest with a "
+        "column-inspector strategy. Use this tool only for price/volume analysis."
+    ),
     input_schema={
         "type": "object",
         "properties": {
