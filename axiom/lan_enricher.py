@@ -80,8 +80,12 @@ def _ensure_utc_ts(df: pd.DataFrame) -> pd.DataFrame:
     """Return copy with 'timestamp' as UTC-aware datetime64."""
     df = df.copy()
     if "timestamp" not in df.columns:
-        if df.index.name == "timestamp":
+        if isinstance(df.index, pd.DatetimeIndex):
+            # Handles any DatetimeIndex name (e.g. "t" after merge_asof clobbers "timestamp").
+            orig_name = df.index.name
             df = df.reset_index()
+            if orig_name != "timestamp":
+                df = df.rename(columns={orig_name: "timestamp"})
         else:
             return df
     ts = df["timestamp"]
@@ -108,7 +112,7 @@ def _fetch_matrix_day(asset: str, interval: str, date_str: str) -> Optional[pd.D
     """Fetch /features/matrix for one calendar day."""
     url = f"{_base_url()}/features/matrix"
     params = {
-        "assets": asset,
+        "asset": asset,
         "interval": interval,
         "start": f"{date_str}T00:00:00",
         "end": f"{date_str}T23:59:59",
@@ -127,7 +131,15 @@ def _fetch_matrix_day(asset: str, interval: str, date_str: str) -> Optional[pd.D
     if not data:
         return None
     try:
-        df = pd.DataFrame(data)
+        # API returns {asset, interval, rows, columns, data: [...]} envelope.
+        # Fall back to treating the payload itself as a list for older API versions.
+        rows = data.get("data", data) if isinstance(data, dict) else data
+        if not rows:
+            return None
+        df = pd.DataFrame(rows)
+        # API uses "date" as the timestamp key; normalise to "timestamp".
+        if "date" in df.columns and "timestamp" not in df.columns:
+            df = df.rename(columns={"date": "timestamp"})
         if df.empty or "timestamp" not in df.columns:
             return None
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
@@ -164,11 +176,13 @@ def _get_matrix_day(asset: str, interval: str, date_str: str) -> Optional[pd.Dat
 
 def _merge_lan(df: pd.DataFrame, lan_df: pd.DataFrame) -> pd.DataFrame:
     """Left-merge LAN enrichment onto df via merge_asof on timestamp."""
-    had_ts_index = df.index.name == "timestamp"
+    had_ts_index = isinstance(df.index, pd.DatetimeIndex)
 
     left = _ensure_utc_ts(df)
     lan_df = lan_df.copy()
-    lan_df["timestamp"] = pd.to_datetime(lan_df["timestamp"], utc=True)
+    # Pin both sides to ns UTC so merge_asof doesn't raise "incompatible merge keys"
+    # when the LAN API returns us-precision timestamps and the candle frame is ns.
+    lan_df["timestamp"] = pd.to_datetime(lan_df["timestamp"], utc=True).astype("datetime64[ns, UTC]")
 
     # For duplicate columns, keep whichever source has more non-null values.
     # This ensures a sparse existing column (e.g. OI with 1% coverage) gets
@@ -197,6 +211,9 @@ def _merge_lan(df: pd.DataFrame, lan_df: pd.DataFrame) -> pd.DataFrame:
     if lan_df.columns.tolist() == ["timestamp"]:
         # Nothing left to join.
         return df
+
+    # Pin left timestamp to ns UTC (matches the right side pinned above).
+    left["timestamp"] = left["timestamp"].astype("datetime64[ns, UTC]")
 
     # Preserve original row order across sort.
     left["_row_idx"] = range(len(left))
@@ -259,7 +276,7 @@ def _enrich_live(df: pd.DataFrame, asset: str) -> pd.DataFrame:
     """Merge the freshest non-stale metrics from /metrics/latest onto df."""
     url = f"{_base_url()}/metrics/latest"
     try:
-        r = _get_session().get(url, params={"assets": asset}, timeout=10)
+        r = _get_session().get(url, params={"asset": asset}, timeout=10)
         r.raise_for_status()
         rows = r.json()
     except Exception as exc:

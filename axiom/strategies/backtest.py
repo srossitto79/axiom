@@ -2141,11 +2141,13 @@ def _enrich_with_market_data(df: pd.DataFrame, asset: str) -> pd.DataFrame:
             fr_df = fr_df.set_index("t").sort_index()[["funding_rate"]]
             fr_df = _coerce_index_to_ns_utc(fr_df)
             # Merge_asof: align funding to candle timestamps (backward fill)
+            _orig_idx_name = df.index.name
             df = pd.merge_asof(
                 df, fr_df,
                 left_index=True, right_index=True,
                 direction="backward",
             )
+            df.index.name = _orig_idx_name
             log.debug("Enriched %s with %d funding rate records", asset, len(fr_df))
 
         # Open interest
@@ -2155,11 +2157,13 @@ def _enrich_with_market_data(df: pd.DataFrame, asset: str) -> pd.DataFrame:
             oi_df["t"] = pd.to_datetime(oi_df["timestamp_ms"], unit="ms", utc=True)
             oi_df = oi_df.set_index("t").sort_index()[["open_interest"]]
             oi_df = _coerce_index_to_ns_utc(oi_df)
+            _orig_idx_name = df.index.name
             df = pd.merge_asof(
                 df, oi_df,
                 left_index=True, right_index=True,
                 direction="backward",
             )
+            df.index.name = _orig_idx_name
             log.debug("Enriched %s with %d OI records", asset, len(oi_df))
 
     except Exception as exc:
