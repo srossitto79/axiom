@@ -28,6 +28,10 @@ export interface SettingsEntry {
   id: string;
   label: string;
   unit?: string;
+  // Opt-in live helper next to a numeric input. 'years' renders "≈ N.Ny" derived
+  // from a day-valued field (e.g. the Backtest window) so an operator entering 1095
+  // days immediately sees it as ~3 years.
+  valueHint?: 'years';
   default: unknown;
   type: 'number' | 'text' | 'toggle' | 'select' | 'secret' | 'csv';
   options?: Array<{ value: string; label: string }>;
@@ -79,14 +83,17 @@ export const SETTINGS_SUBSECTIONS: SettingsSubsection[] = [
   { id: 'trading-risk-advanced', area: 'trading', label: 'Risk advanced', description: 'Rarely-changed risk filter overrides.', advanced: true },
 
   // Lab
+  { id: 'lab-pipeline-preset', area: 'lab', label: 'Pipeline stance', description: 'Pick a stance preset to set every gate below in one move, then fine-tune individual knobs (which flips you to Custom).' },
   { id: 'lab-pipeline-quick-screen', area: 'lab', label: 'Quick Screen (Step 1)', description: 'First-pass quick screen thresholds before the gauntlet.' },
   { id: 'lab-pipeline-robustness-gauntlet', area: 'lab', label: 'Robustness Gauntlet (Step 2)', description: 'Robustness, trade count, and Sharpe thresholds for the gauntlet stage.' },
   { id: 'lab-pipeline-paper-live-gates', area: 'lab', label: 'Paper to Live gates', description: 'Gates a paper-trading strategy must clear to graduate to live.' },
+  { id: 'lab-pipeline-safety-floors', area: 'lab', label: 'Safety floors', description: 'Absolute anti-bypass rails clamped onto the promotion gates. The live_* floors gate REAL MONEY at the paper->live capital gate — loosen with care.' },
   { id: 'lab-pipeline-capacity', area: 'lab', label: 'Pipeline capacity', description: 'WIP caps for unattended strategy promotion lanes.' },
   { id: 'lab-pipeline-live-graduated', area: 'lab', label: 'Live graduated', description: 'Controls for strategies already running live.' },
   { id: 'lab-pipeline-testing-mode', area: 'lab', label: 'Pipeline testing mode', description: 'Bypass safety gates for end-to-end pipeline testing.', advanced: true },
   { id: 'lab-research', area: 'lab', label: 'Research', description: 'Crucible research cadence and ideation parameters.' },
-  { id: 'lab-backtest-defaults', area: 'lab', label: 'Gauntlet defaults', description: 'Symbol, timeframe, fees, slippage, and duration used by ad-hoc Gauntlet runs.' },
+  { id: 'lab-backtest-defaults', area: 'lab', label: 'Gauntlet defaults', description: 'The default backtest window (used by ad-hoc runs and inherited by any per-stage window left at 0), plus the symbol, timeframe, fees, slippage, and funding defaults used by ad-hoc Gauntlet runs.' },
+  { id: 'lab-stage-windows', area: 'lab', label: 'Per-stage backtest windows', description: 'Each automated pipeline stage that runs a backtest has its own lookback window. Set a stage to 0 to inherit the Default backtest window; set a positive number of days to give that stage its own horizon (e.g. a short quick-screen and a multi-year walk-forward).' },
   { id: 'lab-walkforward-defaults', area: 'lab', label: 'Walk-forward defaults', description: 'Number of train/test folds and the train ratio used by the walk-forward runner.' },
 
   // Agents / Models — moved to the dedicated Agents control page (/agents).
@@ -101,7 +108,7 @@ export const SETTINGS_SUBSECTIONS: SettingsSubsection[] = [
   { id: 'notif-delivery', area: 'notifications', label: 'Delivery policy', description: 'Overall notification level and noise control.' },
 
   // System
-  { id: 'system-api-keys', area: 'system', label: 'Data source API keys', description: 'Tiingo, FRED, CoinGecko, Polygon, Alpaca keys.' },
+  { id: 'system-api-keys', area: 'system', label: 'Data source API keys', description: 'Polygon.io market-data key.' },
   { id: 'system-remote-engine', area: 'system', label: 'Remote engine', description: 'Offload backtests to a remote engine process.' },
   { id: 'system-throughput', area: 'system', label: 'Throughput', description: 'Agent cadences and pipeline throughput presets.', advanced: true },
   { id: 'system-resource-tuning', area: 'system', label: 'Resource tuning', description: 'Worker counts, claim limits, drain mode, and other backpressure knobs.', advanced: true },
@@ -659,6 +666,29 @@ export const SETTINGS_MANIFEST: SettingsEntry[] = [
   },
 
   // -------------------- LAB: PIPELINE --------------------
+  // Stance preset selector. Picking a non-custom value persists `pipeline_preset`
+  // and the backend (policy._apply_pipeline_preset) resolves the whole knob bundle
+  // on load. Editing any individual pipeline knob below flips this to "custom"
+  // (handled in SettingsLab.svelte) so per-knob overrides win as-is.
+  {
+    id: 'pipeline.pipeline_preset',
+    label: 'Stance preset',
+    default: 'default',
+    type: 'select',
+    options: [
+      { value: 'relaxed', label: 'Relaxed' },
+      { value: 'default', label: 'Default' },
+      { value: 'strict', label: 'Strict' },
+      { value: 'custom', label: 'Custom' },
+    ],
+    area: 'lab',
+    subsection: 'lab-pipeline-preset',
+    backendSection: 'pipeline',
+    backendPath: 'pipeline_preset',
+    description:
+      'Bundle of gate thresholds applied at load. Relaxed = easiest path to paper (min_trades 5, WFA fold 25%, paper 5 closed trades). Default = balanced (min_trades 20, WFA fold 33%, paper 10 closed trades). Strict = rigorous (min_trades 30, WFA fold 50%, paper 50 closed trades, cost-stress required). Custom = the per-knob values below are used as-is.',
+    usedBy: ['forven.policy'],
+  },
   // Pipeline testing mode (via updatePipelineSettings / pipelineConfig)
   {
     id: 'pipeline.testing_mode',
@@ -750,6 +780,19 @@ export const SETTINGS_MANIFEST: SettingsEntry[] = [
     description:
       'Robustness-score floor (0-100) for the quick-screen guardrails (Gate3). The composite score is mostly earned inside the gauntlet, so fresh strategies score near zero — lower this (or enable testing mode) if the pipeline starves at quick screen. Was a hardcoded 50 before.',
     usedBy: ['forven.brain'],
+  },
+  {
+    id: 'pipeline.quick_screen.min_is_sharpe',
+    label: 'Quick-screen min IS Sharpe',
+    default: 0,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-pipeline-quick-screen',
+    backendSection: 'pipeline',
+    backendPath: 'quick_screen.min_is_sharpe',
+    description:
+      'In-sample Sharpe floor enforced at the quick-screen overfitting guardrail (Gate1). Default 0 rejects only genuinely negative IS edge; the Strict preset raises it to 0.2.',
+    usedBy: ['forven.policy', 'forven.brain'],
   },
   {
     id: 'pipeline.quick_screen.fitness_min_trades',
@@ -886,6 +929,19 @@ export const SETTINGS_MANIFEST: SettingsEntry[] = [
     usedBy: ['forven.strategy_lifecycle', 'forven.routers.robustness'],
   },
   {
+    id: 'pipeline.gauntlet.hard_min_is_sharpe',
+    label: 'Gauntlet hard min IS Sharpe',
+    default: 0,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-pipeline-robustness-gauntlet',
+    backendSection: 'pipeline',
+    backendPath: 'gauntlet.hard_min_is_sharpe',
+    description:
+      'Hard in-sample Sharpe sanity floor at the gauntlet entry guardrail — an auto-reject below this. Default 0 rejects only negative IS edge; the Strict preset raises it to 0.3.',
+    usedBy: ['forven.policy', 'forven.brain'],
+  },
+  {
     id: 'pipeline.gauntlet.min_oos_profit_factor',
     label: 'Gauntlet min OOS profit factor',
     default: 1.05,
@@ -947,7 +1003,7 @@ export const SETTINGS_MANIFEST: SettingsEntry[] = [
     backendSection: 'pipeline',
     backendPath: 'gauntlet.mc_max_dd_p95',
     description:
-      'Monte-Carlo 95th-percentile drawdown ceiling at the gauntlet->paper gate. SAFETY FLOOR: the paper gate enforces a hard maximum of 40% regardless of this value — you can make it stricter, not looser — and it fires whenever Monte Carlo actually ran.',
+      'Monte-Carlo 95th-percentile drawdown ceiling at the gauntlet->paper gate. Clamped by the editable safety_floors.mc_max_dd_p95 ceiling (default 50%) in the Safety floors panel; fires whenever Monte Carlo actually ran.',
     usedBy: ['forven.policy'],
   },
   {
@@ -973,7 +1029,7 @@ export const SETTINGS_MANIFEST: SettingsEntry[] = [
     backendSection: 'pipeline',
     backendPath: 'robustness_thresholds.wfa_fold_pass_rate_min',
     description:
-      'Fraction of walk-forward folds that must be OOS-positive to pass the gauntlet->paper gate. SAFETY FLOOR: the paper gate enforces a hard minimum of 40% (stricter allowed, looser ignored) and it fires whenever walk-forward ran, regardless of the required-tests list.',
+      'Fraction of walk-forward folds that must be OOS-positive to pass the gauntlet->paper gate. Clamped by the editable safety_floors.wfa_fold_pass_rate_min floor (default 20%) in the Safety floors panel; fires whenever walk-forward ran, regardless of the required-tests list.',
     usedBy: ['forven.policy'],
   },
   {
@@ -987,7 +1043,7 @@ export const SETTINGS_MANIFEST: SettingsEntry[] = [
     backendSection: 'pipeline',
     backendPath: 'robustness_thresholds.param_jitter_pass_rate_min',
     description:
-      'Fraction of parameter-jitter perturbations that must stay profitable to pass the gauntlet->paper gate. SAFETY FLOOR: the paper gate enforces a hard minimum of 60% (stricter allowed, looser ignored) and it fires whenever param-jitter ran, regardless of the required-tests list.',
+      'Fraction of parameter-jitter perturbations that must stay profitable to pass the gauntlet->paper gate. Clamped by the editable safety_floors.param_jitter_pass_rate_min floor (default 30%) in the Safety floors panel; fires whenever param-jitter ran, regardless of the required-tests list.',
     usedBy: ['forven.policy'],
   },
 
@@ -1248,6 +1304,97 @@ export const SETTINGS_MANIFEST: SettingsEntry[] = [
     usedBy: ['forven.policy', 'forven.strategy_lifecycle'],
   },
 
+  // Safety floors — absolute anti-bypass rails clamped onto the promotion gates.
+  // These bound how far a relaxed preset / custom config can soften the path; set a
+  // floor to 0 (or a *_max_* ceiling to 1.0) to remove that rail entirely. The
+  // min_*/mc_*/wfa_*/param_jitter_* floors clamp the gauntlet->PAPER entry gate (no
+  // real capital); the live_* floors clamp the paper->LIVE (real money) gate.
+  // The ratio floors are stored/read as fractions (0-1), NOT whole percent.
+  {
+    id: 'pipeline.safety_floors.min_trades',
+    label: 'Floor: min trades (->paper)',
+    default: 3,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-pipeline-safety-floors',
+    backendSection: 'pipeline',
+    backendPath: 'safety_floors.min_trades',
+    description: 'Absolute minimum gauntlet trade count no preset/custom config can soften below at the gauntlet->paper gate.',
+    usedBy: ['forven.policy'],
+  },
+  {
+    id: 'pipeline.safety_floors.min_robustness_score',
+    label: 'Floor: min robustness (->paper)',
+    default: 0,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-pipeline-safety-floors',
+    backendSection: 'pipeline',
+    backendPath: 'safety_floors.min_robustness_score',
+    description: 'Absolute robustness-score floor (0-100) clamped onto the gauntlet->paper gate. Default 0 = no extra rail beyond the gauntlet knob itself.',
+    usedBy: ['forven.policy'],
+  },
+  {
+    id: 'pipeline.safety_floors.mc_max_dd_p95',
+    label: 'Floor: Monte-Carlo p95 max DD (->paper)',
+    default: 0.5,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-pipeline-safety-floors',
+    backendSection: 'pipeline',
+    backendPath: 'safety_floors.mc_max_dd_p95',
+    description: 'Ceiling (fraction 0-1) on the Monte-Carlo 95th-percentile drawdown at the gauntlet->paper gate. Tail DD can never be relaxed above this. 0.50 = 50%.',
+    usedBy: ['forven.policy'],
+  },
+  {
+    id: 'pipeline.safety_floors.wfa_fold_pass_rate_min',
+    label: 'Floor: WFA fold pass-rate (->paper)',
+    default: 0.2,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-pipeline-safety-floors',
+    backendSection: 'pipeline',
+    backendPath: 'safety_floors.wfa_fold_pass_rate_min',
+    description: 'Absolute walk-forward fold pass-rate floor (fraction 0-1) clamped onto the gauntlet->paper gate. 0.20 = 20% of folds OOS-positive.',
+    usedBy: ['forven.policy'],
+  },
+  {
+    id: 'pipeline.safety_floors.param_jitter_pass_rate_min',
+    label: 'Floor: param-jitter pass-rate (->paper)',
+    default: 0.3,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-pipeline-safety-floors',
+    backendSection: 'pipeline',
+    backendPath: 'safety_floors.param_jitter_pass_rate_min',
+    description: 'Absolute parameter-jitter pass-rate floor (fraction 0-1) clamped onto the gauntlet->paper gate. 0.30 = 30% of perturbations stay profitable.',
+    usedBy: ['forven.policy'],
+  },
+  {
+    id: 'pipeline.safety_floors.live_min_closed_trades',
+    label: 'Floor: live min closed trades (REAL MONEY)',
+    default: 3,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-pipeline-safety-floors',
+    backendSection: 'pipeline',
+    backendPath: 'safety_floors.live_min_closed_trades',
+    description: 'REAL-MONEY rail: absolute minimum closed paper trades clamped onto the paper->live capital gate. No preset can graduate a strategy to live below this.',
+    usedBy: ['forven.policy'],
+  },
+  {
+    id: 'pipeline.safety_floors.live_max_drawdown_pct',
+    label: 'Floor: live max drawdown (REAL MONEY)',
+    default: 0.25,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-pipeline-safety-floors',
+    backendSection: 'pipeline',
+    backendPath: 'safety_floors.live_max_drawdown_pct',
+    description: 'REAL-MONEY rail: drawdown ceiling (fraction 0-1) clamped onto the paper->live capital gate. 0.25 = 25%. The effective live gate is the stricter of this and the paper drawdown knob.',
+    usedBy: ['forven.policy'],
+  },
+
   // Pipeline capacity
   {
     id: 'pipeline.paper_wip_cap_mode',
@@ -1371,16 +1518,120 @@ export const SETTINGS_MANIFEST: SettingsEntry[] = [
   },
   {
     id: 'backtesting-defaults.backtest_duration_days',
-    label: 'Gauntlet duration',
+    label: 'Default backtest window',
     unit: 'days',
-    default: 365,
+    valueHint: 'years',
+    default: 730,
     type: 'number',
     area: 'lab',
     subsection: 'lab-backtest-defaults',
     backendSection: 'backtesting-defaults',
     backendPath: 'backtest_duration_days',
-    description: 'Default window (in days) loaded for ad-hoc Gauntlet runs.',
-    usedBy: ['forven.api_core', 'forven.routers.backtesting', 'forven.strategies.backtest'],
+    description:
+      'Default lookback window (in days, ending now) for ad-hoc / manual backtests, and the fallback any per-stage window below inherits when left at 0. Each pipeline stage can override this independently under "Per-stage backtest windows". (e.g. 1095 ≈ 3 years.)',
+    usedBy: [
+      'forven.api_core',
+      'forven.routers.backtesting',
+      'forven.strategies.backtest',
+    ],
+  },
+  {
+    id: 'backtesting-defaults.quick_screen_duration_days',
+    label: 'Quick-screen window',
+    unit: 'days',
+    valueHint: 'years',
+    default: 0,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-stage-windows',
+    backendSection: 'backtesting-defaults',
+    backendPath: 'quick_screen_duration_days',
+    description: 'Backtest window for the quick-screen step (the cheap pre-gauntlet triage). 0 = inherit the Default backtest window.',
+    usedBy: ['forven.gauntlet.tasks', 'forven.api_core'],
+  },
+  {
+    id: 'backtesting-defaults.timeframe_sweep_duration_days',
+    label: 'Timeframe-sweep window',
+    unit: 'days',
+    valueHint: 'years',
+    default: 0,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-stage-windows',
+    backendSection: 'backtesting-defaults',
+    backendPath: 'timeframe_sweep_duration_days',
+    description: 'Backtest window for the timeframe-sweep step (re-runs the strategy across candidate timeframes). 0 = inherit the Default backtest window.',
+    usedBy: ['forven.gauntlet.tasks', 'forven.api_core'],
+  },
+  {
+    id: 'backtesting-defaults.optimization_duration_days',
+    label: 'Optimization window',
+    unit: 'days',
+    valueHint: 'years',
+    default: 0,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-stage-windows',
+    backendSection: 'backtesting-defaults',
+    backendPath: 'optimization_duration_days',
+    description: 'Backtest window for the parameter-optimization (grid-search) step. 0 = inherit the Default backtest window.',
+    usedBy: ['forven.gauntlet.tasks', 'forven.api_core'],
+  },
+  {
+    id: 'backtesting-defaults.confirmation_duration_days',
+    label: 'Confirmation window',
+    unit: 'days',
+    valueHint: 'years',
+    default: 0,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-stage-windows',
+    backendSection: 'backtesting-defaults',
+    backendPath: 'confirmation_duration_days',
+    description: 'Backtest window for the confirmation backtest (re-validates the optimized params). 0 = inherit the Default backtest window.',
+    usedBy: ['forven.gauntlet.tasks', 'forven.api_core'],
+  },
+  {
+    id: 'backtesting-defaults.walk_forward_duration_days',
+    label: 'Walk-forward window',
+    unit: 'days',
+    valueHint: 'years',
+    default: 0,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-stage-windows',
+    backendSection: 'backtesting-defaults',
+    backendPath: 'walk_forward_duration_days',
+    description: 'Total backtest window for walk-forward analysis (split into folds). Often set longer so the out-of-sample folds span multiple regimes. 0 = inherit the Default backtest window.',
+    usedBy: ['forven.strategies.backtest', 'forven.api_core'],
+  },
+  {
+    id: 'backtesting-defaults.cost_stress_duration_days',
+    label: 'Cost-stress window',
+    unit: 'days',
+    valueHint: 'years',
+    default: 0,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-stage-windows',
+    backendSection: 'backtesting-defaults',
+    backendPath: 'cost_stress_duration_days',
+    description: 'Backtest window for the cost-stress robustness rerun (capped at 50k bars on fine timeframes). 0 = inherit the Default backtest window.',
+    usedBy: ['forven.routers.robustness', 'forven.api_core'],
+  },
+  {
+    id: 'backtesting-defaults.evolution_duration_days',
+    label: 'Evolution / discovery window',
+    unit: 'days',
+    valueHint: 'years',
+    default: 0,
+    type: 'number',
+    area: 'lab',
+    subsection: 'lab-stage-windows',
+    backendSection: 'backtesting-defaults',
+    backendPath: 'evolution_duration_days',
+    description: 'Backtest window for the autopilot evolution/crucible validation matrix (per-context, capped ~30k bars). 0 = inherit the Default backtest window.',
+    usedBy: ['forven.evolution', 'forven.api_core'],
   },
   {
     id: 'backtesting-defaults.rolling_backtest_days',
@@ -2179,42 +2430,6 @@ export const SETTINGS_MANIFEST: SettingsEntry[] = [
 
   // -------------------- SYSTEM: API KEYS --------------------
   {
-    id: 'api-keys.tiingo',
-    label: 'Tiingo API key',
-    default: '',
-    type: 'secret',
-    area: 'system',
-    subsection: 'system-api-keys',
-    backendSection: 'api-keys',
-    backendPath: 'tiingo',
-    description: 'API key for Tiingo market-data endpoints.',
-    usedBy: ['forven.data_manager', 'forven.api_core'],
-  },
-  {
-    id: 'api-keys.fred',
-    label: 'FRED API key',
-    default: '',
-    type: 'secret',
-    area: 'system',
-    subsection: 'system-api-keys',
-    backendSection: 'api-keys',
-    backendPath: 'fred',
-    description: 'API key for FRED macroeconomic series.',
-    usedBy: ['forven.data_manager', 'forven.api_core'],
-  },
-  {
-    id: 'api-keys.coingecko',
-    label: 'CoinGecko API key',
-    default: '',
-    type: 'secret',
-    area: 'system',
-    subsection: 'system-api-keys',
-    backendSection: 'api-keys',
-    backendPath: 'coingecko',
-    description: 'API key for CoinGecko data.',
-    usedBy: ['forven.data_manager', 'forven.api_core'],
-  },
-  {
     id: 'api-keys.polygon',
     label: 'Polygon API key',
     default: '',
@@ -2224,19 +2439,7 @@ export const SETTINGS_MANIFEST: SettingsEntry[] = [
     backendSection: 'api-keys',
     backendPath: 'polygon',
     description: 'API key for Polygon.io market data.',
-    usedBy: ['forven.data_manager', 'forven.api_core'],
-  },
-  {
-    id: 'api-keys.alpaca',
-    label: 'Alpaca API key',
-    default: '',
-    type: 'secret',
-    area: 'system',
-    subsection: 'system-api-keys',
-    backendSection: 'api-keys',
-    backendPath: 'alpaca',
-    description: 'API key for Alpaca broker/data endpoints.',
-    usedBy: ['forven.data_manager', 'forven.api_core'],
+    usedBy: ['forven.polygon_client', 'forven.data', 'forven.api_core'],
   },
 
   // -------------------- SYSTEM: TELEMETRY --------------------

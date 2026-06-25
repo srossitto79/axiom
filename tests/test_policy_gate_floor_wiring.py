@@ -4,8 +4,9 @@ M-15: quick-screen IS/OOS PF floor honors quick_screen.min_profit_factor; the
 gauntlet OOS PF floor honors gauntlet.min_oos_profit_factor; the paper->live PF
 floors honor paper_trading.min_profit_factor_live /
 paper_trading.pf_position_reduction_threshold; the OOS>>IS Sharpe ratio honors
-paper_trading.max_oos_is_ratio. Defaults preserve the previously-hardcoded
-values exactly (1.05 / 1.05 / 1.5 / 2.0 / 1.5) — wiring, not relaxing.
+paper_trading.max_oos_is_ratio. These are all wired settings; the Default-preset
+values are (1.0 / 1.05 / 1.5 / 2.0 / 1.5) — quick_screen.min_profit_factor was
+relaxed 1.05->1.0 under the "achievable paper" Default preset; the rest unchanged.
 
 M-14: the paper->live OOS>>IS overfitting check reads NESTED
 in_sample/out_of_sample Sharpe (with flat is_sharpe/oos_sharpe fallback) — it
@@ -76,7 +77,8 @@ def _config_with(section: str, **overrides) -> dict:
 
 def test_new_gate_floor_knobs_have_unchanged_defaults(forven_db):
     cfg = load_pipeline_config()
-    assert abs(float(cfg["quick_screen"]["min_profit_factor"]) - 1.05) < 1e-9
+    # quick_screen PF relaxed 1.05->1.0 under the Default preset; the rest unchanged.
+    assert abs(float(cfg["quick_screen"]["min_profit_factor"]) - 1.0) < 1e-9
     assert abs(float(cfg["gauntlet"]["min_oos_profit_factor"]) - 1.05) < 1e-9
     assert abs(float(cfg["paper_trading"]["min_profit_factor_live"]) - 1.5) < 1e-9
     assert abs(float(cfg["paper_trading"]["pf_position_reduction_threshold"]) - 2.0) < 1e-9
@@ -109,7 +111,7 @@ def test_quick_screen_pf_floor_rejects_at_default(forven_db):
     passed, msg = _evaluate_quick_screen_gate("qs-default-pf", load_pipeline_config())
     assert not passed
     assert "Profit Factor" in msg
-    assert "1.05" in msg
+    assert "1.00" in msg  # Default preset PF floor relaxed 1.05 -> 1.0
 
 
 def test_quick_screen_pf_floor_honors_operator_knob(forven_db):

@@ -208,9 +208,12 @@ def _gauntlet_entry_guardrails(strategy_id: str, metrics: dict) -> tuple[bool, s
     if max_drawdown is not None and abs(max_drawdown) <= 1.0:
         max_drawdown = max_drawdown * 100.0
 
-    # Guard 1: Hard Sanity Check - IS Sharpe < 0.3 (always enforced)
-    if is_sharpe is not None and is_sharpe < 0.3:
-        return False, f"Hard sanity check failed: IS Sharpe {is_sharpe:.2f} < 0.3 (auto-reject)"
+    # Guard 1: Hard Sanity Check on IS Sharpe. Was a hardcoded 0.3 auto-reject that
+    # no Settings knob could relax; now wired to gauntlet.hard_min_is_sharpe
+    # (Default 0.0 = reject only genuinely negative IS edge; Strict preset 0.3).
+    hard_min_is_sharpe = float(gauntlet_cfg.get("hard_min_is_sharpe", 0.0))
+    if is_sharpe is not None and is_sharpe < hard_min_is_sharpe:
+        return False, f"Hard sanity check failed: IS Sharpe {is_sharpe:.2f} < {hard_min_is_sharpe} (auto-reject)"
 
     # Guard 2: IS Sharpe Gate (configurable via settings)
     if is_sharpe is None or is_sharpe < min_sharpe_threshold:

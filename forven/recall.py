@@ -293,6 +293,7 @@ def _record_cost_row(
     aux_model: str | None,
     latency_ms: int,
     status: str = "done",
+    summary: str = "",
 ) -> int | None:
     """Insert a synthetic ``agent_tasks`` row tagged with the recall query so
     the Phase 0 cost rollup catches recall spend. Best-effort — returns the
@@ -300,7 +301,17 @@ def _record_cost_row(
     """
     title = f"recall: {query[:60]}"
     description = query
-    output = json.dumps({"latency_ms": latency_ms})
+    # Also store the request (query) + response (synthesized summary) so the agent
+    # Logs tab "Recent calls" view shows the recall back-and-forth, not just a blank
+    # diagnostic row. (These are RAG memory lookups; the Brain's own reasoning is a
+    # separate brain_invoke task.)
+    from forven.redact import redact
+
+    output = json.dumps({
+        "latency_ms": latency_ms,
+        "request": redact(query[:6000])[0],
+        "response": redact((summary or "")[:8000])[0],
+    })
     try:
         with get_db() as conn:
             # agent_id 'brain' is fine here; we don't need it to exist as an
@@ -378,7 +389,7 @@ def recall_similar_situation(
             summary = ""
 
     latency_ms = int((time.monotonic() - started) * 1000)
-    _record_cost_row(q, aux_provider, aux_model, latency_ms)
+    _record_cost_row(q, aux_provider, aux_model, latency_ms, summary=summary)
 
     return {
         "summary": summary,

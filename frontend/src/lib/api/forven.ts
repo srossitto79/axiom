@@ -19,7 +19,9 @@ export type ForvenProvider =
 	| 'cerebras'
 	| 'mistral'
 	| 'xai'
-	| 'together';
+	| 'together'
+	| 'opencode-zen'
+	| 'opencode-go';
 
 // ============== Forven Classic Compatibility ==============
 

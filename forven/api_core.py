@@ -17,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 
 from forven.ai import normalize_provider_and_model
+from forven.codex_responses import is_openai_oauth_token
 from forven.model_routing import (
     get_default_model_for_provider,
     get_model_routing_snapshot,
@@ -261,7 +262,7 @@ def _parse_int_query(value: str | None, default: int = 0) -> int:
         return default
 
 
-_SUPPORTED_AUTH_PROVIDERS: list[str] = ["openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek", "groq", "gemini", "cerebras", "mistral", "xai", "together"]
+_SUPPORTED_AUTH_PROVIDERS: list[str] = ["openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek", "groq", "gemini", "cerebras", "mistral", "xai", "together", "opencode-zen", "opencode-go"]
 _AUTH_PROVIDER_ENV_VARS = {
     "openai": "OPENAI_API_KEY",
     "minimax": "MINIMAX_API_KEY",
@@ -276,6 +277,8 @@ _AUTH_PROVIDER_ENV_VARS = {
     "mistral": "MISTRAL_API_KEY",
     "xai": "XAI_API_KEY",
     "together": "TOGETHER_API_KEY",
+    "opencode-zen": "OPENCODE_ZEN_API_KEY",
+    "opencode-go": "OPENCODE_GO_API_KEY",
 }
 _AUTH_OAUTH_SESSIONS: dict[str, dict[str, dict[str, object]]] = {}
 _AUTH_OAUTH_CALLBACKS: dict[str, dict[str, str]] = {}
@@ -313,6 +316,10 @@ _MODEL_DISCOVERY_ALT_ENDPOINTS = {
     "cerebras": ["https://api.cerebras.ai/v1/models"],
     "mistral": ["https://api.mistral.ai/v1/models"],
     "xai": ["https://api.x.ai/v1/models"],
+    # OpenCode Zen exposes an OpenAI-compatible /models route (curated catalog).
+    # OpenCode GO has NO /models endpoint (chat-completions only), so it is not
+    # listed here — its models are curated in _AGENT_MODEL_CATALOG instead.
+    "opencode-zen": ["https://opencode.ai/zen/v1/models"],
     # Together is a large gateway; its models are curated in the catalog rather
     # than discovered, to avoid flooding the picker.
 }
@@ -349,6 +356,9 @@ _MODEL_DISCOVERY_HEADERS = {
     "xai": {
         "Authorization": "Bearer {token}",
     },
+    "opencode-zen": {
+        "Authorization": "Bearer {token}",
+    },
 }
 
 # Endpoints used by the connection "Test" to verify a key is actually valid
@@ -378,6 +388,8 @@ _MODEL_PROVIDER_DISPLAY_NAMES = {
     "mistral": "Mistral",
     "xai": "xAI (Grok)",
     "together": "Together AI",
+    "opencode-zen": "OpenCode Zen",
+    "opencode-go": "OpenCode GO",
 }
 _LOCAL_PROVIDER_DEFAULT_BASE_URLS = {
     "lmstudio": "http://127.0.0.1:1234",
@@ -467,6 +479,28 @@ _AGENT_MODEL_CATALOG = [
     {"provider": "together", "model_id": "Qwen/Qwen2.5-72B-Instruct-Turbo", "label": "Together Qwen 2.5 72B Turbo"},
     {"provider": "together", "model_id": "deepseek-ai/DeepSeek-V3", "label": "Together DeepSeek V3"},
     {"provider": "together", "model_id": "mistralai/Mixtral-8x7B-Instruct-v0.1", "label": "Together Mixtral 8x7B"},
+    # OpenCode Zen: live-discovered via /v1/models; these seed sensible defaults
+    # and a fallback when discovery is unavailable.
+    {"provider": "opencode-zen", "model_id": "grok-code", "label": "OpenCode Zen Grok Code Fast"},
+    {"provider": "opencode-zen", "model_id": "big-pickle", "label": "OpenCode Zen Big Pickle"},
+    {"provider": "opencode-zen", "model_id": "claude-sonnet-4-5", "label": "OpenCode Zen Claude Sonnet 4.5"},
+    {"provider": "opencode-zen", "model_id": "gpt-5", "label": "OpenCode Zen GPT-5"},
+    {"provider": "opencode-zen", "model_id": "qwen3-coder", "label": "OpenCode Zen Qwen3 Coder"},
+    {"provider": "opencode-zen", "model_id": "kimi-k2", "label": "OpenCode Zen Kimi K2"},
+    # OpenCode GO: flat-rate subscription with NO /models discovery, so the full
+    # tool-capable catalog is curated here from the GO docs.
+    {"provider": "opencode-go", "model_id": "glm-5.2", "label": "OpenCode GO GLM-5.2"},
+    {"provider": "opencode-go", "model_id": "glm-5.1", "label": "OpenCode GO GLM-5.1"},
+    {"provider": "opencode-go", "model_id": "kimi-k2.7", "label": "OpenCode GO Kimi K2.7 Code"},
+    {"provider": "opencode-go", "model_id": "kimi-k2.6", "label": "OpenCode GO Kimi K2.6"},
+    {"provider": "opencode-go", "model_id": "deepseek-v4-pro", "label": "OpenCode GO DeepSeek V4 Pro"},
+    {"provider": "opencode-go", "model_id": "deepseek-v4-flash", "label": "OpenCode GO DeepSeek V4 Flash"},
+    {"provider": "opencode-go", "model_id": "minimax-m3", "label": "OpenCode GO MiniMax M3"},
+    {"provider": "opencode-go", "model_id": "minimax-m2.7", "label": "OpenCode GO MiniMax M2.7"},
+    {"provider": "opencode-go", "model_id": "mimo-v2.5-pro", "label": "OpenCode GO MiMo V2.5 Pro"},
+    {"provider": "opencode-go", "model_id": "mimo-v2.5", "label": "OpenCode GO MiMo V2.5"},
+    {"provider": "opencode-go", "model_id": "qwen3.7-max", "label": "OpenCode GO Qwen3.7 Max"},
+    {"provider": "opencode-go", "model_id": "qwen3.7-plus", "label": "OpenCode GO Qwen3.7 Plus"},
     # OpenRouter: free tool-capable models are auto-discovered; these curated
     # entries are reliable fallbacks (always selectable even if discovery fails).
     {"provider": "openrouter", "model_id": "openrouter/free", "label": "OpenRouter Auto (free, tool-capable router)"},
@@ -570,6 +604,12 @@ def _looks_like_mistral_discovery_model(model: str) -> bool:
     return True
 
 
+def _looks_like_opencode_discovery_model(model: str) -> bool:
+    # OpenCode Zen's /models route lists only curated chat/coding models;
+    # accept any non-empty id.
+    return bool(str(model or "").strip())
+
+
 def _looks_like_xai_discovery_model(model: str) -> bool:
     lowered = model.lower().strip()
     # Keep generative grok chat models; drop image-generation variants.
@@ -632,6 +672,8 @@ def _discovery_model_should_belong(provider: str, model_id: str) -> bool:
         return _looks_like_mistral_discovery_model(model_id)
     if provider == "xai":
         return _looks_like_xai_discovery_model(model_id)
+    if provider == "opencode-zen":
+        return _looks_like_opencode_discovery_model(model_id)
     return False
 
 
@@ -898,6 +940,16 @@ def _discover_provider_models(provider: str, force_refresh: bool = False) -> tup
 
     if used_configured_profile:
         source = "provider-api"
+
+    # A ChatGPT OAuth token authenticates against the Codex backend, not the
+    # platform ``/v1/models`` endpoint (which 401s for it). Probing there would
+    # discard the curated codex catalog behind a scary auth error, so skip the
+    # probe and serve the curated list directly.
+    if provider == "openai" and is_openai_oauth_token(token):
+        _AGENT_MODEL_LIST_CACHE[provider] = {
+            "fetched_at": now, "models": fallback, "error": None, "source": "codex-oauth",
+        }
+        return fallback, None
 
     header = {
         key: value.format(token=token)
@@ -1504,6 +1556,14 @@ _SETTINGS_SECRET_STORAGE_KEY = "forven:settings:secrets"
 _SETTINGS_API_KEYS_STORAGE_KEY = "forven:settings:api-keys"
 _SETTINGS_PIPELINE_STORAGE_KEY = "forven:pipeline:settings"
 
+# Single source of truth for the default backtest window (calendar days). This ONE
+# setting governs every automatic backtest that doesn't carry an explicit start/end:
+# quick-screen, gauntlet timeframe-sweep/optimization/confirmation, walk-forward,
+# the cost-stress rerun, and the evolution/crucible validation matrix. Every fallback
+# below references this so a missing key can never silently shrink the window (the old
+# scattered 365/30 fallbacks did exactly that, contradicting the saved 730 default).
+DEFAULT_BACKTEST_DURATION_DAYS = 730
+
 _DEFAULT_SETTINGS_PAYLOAD = {
     "exchange": "hyperliquid",
     "trading_mode": "paper",
@@ -1636,7 +1696,24 @@ _DEFAULT_SETTINGS_PAYLOAD = {
     "backtest_slippage_bps": 2.0,
     "backtest_timeframe": "1h",
     "backtest_symbol": "BTC/USDT",
-    "backtest_duration_days": 365,
+    # DEFAULT backtest window (calendar days, ending now). Used directly by ad-hoc /
+    # manual backtests, and as the fallback any PER-STAGE window below inherits when it
+    # is left at 0. 730d so slower timeframes (4h) reach a meaningful trade sample and
+    # the WFA OOS folds span >1 market regime. Settings > Lab > "Default backtest window".
+    "backtest_duration_days": DEFAULT_BACKTEST_DURATION_DAYS,
+    # PER-STAGE backtest windows (calendar days). Each automated pipeline stage that
+    # runs a backtest has its OWN tunable window so e.g. quick-screen can be short while
+    # walk-forward spans years. Resolved via stage_backtest_duration_days(). Default 0 =
+    # "inherit the Default backtest window" above — so out of the box every stage tracks
+    # whatever backtest_duration_days is set to (behaviour-preserving). Set a positive
+    # number of days to give that stage its own independent horizon.
+    "quick_screen_duration_days": 0,
+    "timeframe_sweep_duration_days": 0,
+    "optimization_duration_days": 0,
+    "confirmation_duration_days": 0,
+    "walk_forward_duration_days": 0,
+    "cost_stress_duration_days": 0,
+    "evolution_duration_days": 0,
     # When enabled, backtests deduct cumulative perp funding from each trade's
     # PnL and refuse to promote strategies whose funding data was incomplete.
     "backtest_include_funding": True,
@@ -1658,7 +1735,12 @@ _DEFAULT_SETTINGS_PAYLOAD = {
     "updated_at": _now(),
 }
 
-_DEFAULT_API_KEY_SOURCES = ("tiingo", "fred", "coingecko", "polygon", "alpaca")
+# Only Polygon is wired to a consumer (forven.config.get_polygon_api_key ->
+# polygon_client / data layer). The Tiingo/FRED/CoinGecko/Alpaca key fields were
+# never read by any code, so they were removed from the Settings UI and dropped
+# here too. Any previously-stored keys still round-trip via get_settings_api_keys'
+# fallback loop, so nothing is lost.
+_DEFAULT_API_KEY_SOURCES = ("polygon",)
 
 _PIPELINE_STAGE_WIP_CAPS = {
     "paper": {
@@ -2929,7 +3011,21 @@ def _apply_settings_section(section: str, payload: dict) -> dict:
         if "backtest_symbol" in payload:
             updates["backtest_symbol"] = str(payload.get("backtest_symbol") or "BTC/USDT").strip()
         if "backtest_duration_days" in payload:
-            updates["backtest_duration_days"] = _coerce_optional_int(payload.get("backtest_duration_days"), updates.get("backtest_duration_days", 365))
+            updates["backtest_duration_days"] = _coerce_optional_int(payload.get("backtest_duration_days"), updates.get("backtest_duration_days", DEFAULT_BACKTEST_DURATION_DAYS))
+        # Per-stage backtest windows; 0 = inherit the global default above.
+        for _stage_key in (
+            "quick_screen_duration_days",
+            "timeframe_sweep_duration_days",
+            "optimization_duration_days",
+            "confirmation_duration_days",
+            "walk_forward_duration_days",
+            "cost_stress_duration_days",
+            "evolution_duration_days",
+        ):
+            if _stage_key in payload:
+                updates[_stage_key] = _coerce_optional_int(
+                    payload.get(_stage_key), updates.get(_stage_key, 0)
+                )
         if "rolling_backtest_days" in payload:
             updates["rolling_backtest_days"] = _coerce_optional_int(payload.get("rolling_backtest_days"), updates.get("rolling_backtest_days", 30))
         if "walkforward_months" in payload:
@@ -3274,6 +3370,11 @@ class BacktestSubmitBody(BaseModel):
     end: str | None = None
     params: dict | None = None
     definition_json: dict | None = None
+    # Per-stage window override (calendar days). When set (and start/end are absent),
+    # the default rolling window uses this instead of the global backtest_duration_days
+    # — lets a gauntlet stage run its OWN configured window. <=0/None falls back to the
+    # global default.
+    duration_days: int | None = Field(default=None, ge=0, le=36500)
     # Numeric controls carry sane bounds so absurd/negative values are rejected
     # server-side (the form also validates, but the API is the trust boundary).
     initial_capital: float | None = Field(default=None, gt=0, le=1e12)
@@ -3307,6 +3408,8 @@ class OptimizationSubmitBody(BaseModel):
     parameter_ranges: dict | None = None
     start: str | None = None
     end: str | None = None
+    # Per-stage window override (calendar days); see BacktestSubmitBody.duration_days.
+    duration_days: int | None = Field(default=None, ge=0, le=36500)
     definition_json: dict | None = None
     fee_bps: float | None = Field(default=None, ge=0, le=1000)
     slippage_bps: float | None = Field(default=None, ge=0, le=1000)
@@ -6360,12 +6463,19 @@ def _append_settings_audit(log: list[dict], entries: list[dict], cap: int = 50) 
 
 
 _PIPELINE_THRESHOLD_SETTING_KEYS = {
+    # Active stance preset (relaxed | default | strict | custom). A plain string,
+    # not a section dict — routes to the pipeline KV so policy._apply_pipeline_preset
+    # can resolve the bundle on load.
+    "pipeline_preset",
     "testing_mode",
     "quick_screen",
     "gauntlet",
     "walk_forward",
     "robustness_thresholds",
     "paper_trading",
+    # Absolute anti-bypass floors (incl. the real-money live_* rails). Must route to
+    # the pipeline KV that the promotion gates read, not the flat settings blob.
+    "safety_floors",
     "live_graduated",
     "paper_gate",
     "deploy_gate",
@@ -6405,6 +6515,18 @@ def get_settings():
         for key in _PIPELINE_THRESHOLD_SETTING_KEYS:
             if key in policy_config:
                 payload[key] = policy_config[key]
+    except Exception:
+        pass
+    # Resolved preset bundles (same display units as the threshold keys above) so the
+    # Settings UI can fill every gate knob live when the operator picks a stance —
+    # without the frontend hardcoding (and drifting from) the policy preset values.
+    try:
+        from forven.policy import _normalize_pipeline_config, pipeline_thresholds_for_display
+
+        payload["pipeline_presets"] = {
+            _name: pipeline_thresholds_for_display(_normalize_pipeline_config({"pipeline_preset": _name}))
+            for _name in ("relaxed", "default", "strict")
+        }
     except Exception:
         pass
     # Reflect the authoritative regime-gating values (config.json + env overrides),
@@ -7432,6 +7554,14 @@ def _verify_provider_key(provider: str, token: str) -> tuple[str, str]:
     key (HTTP 400/401/403) — that is a real "bad key" signal, distinct from a
     transient failure callers may choose to tolerate.
     """
+    # A ChatGPT OAuth token is valid against the Codex backend but always 401s
+    # against api.openai.com/v1/models — probing there would misreport a working
+    # OAuth connection as a bad key. The token was minted via the TLS OAuth
+    # exchange and get_token() already refreshed it if expired, so treat a
+    # well-formed OAuth token as connected.
+    if provider == "openai" and is_openai_oauth_token(token):
+        return "ok", "Connected (ChatGPT OAuth)"
+
     endpoints = (
         _AUTH_TEST_ENDPOINT_OVERRIDES.get(provider)
         or _MODEL_DISCOVERY_ALT_ENDPOINTS.get(provider, [])
@@ -7822,12 +7952,54 @@ def get_agent_terminal(agent_id: str):
             (source_prefix, source_like),
         ).fetchall()
         logs_payload = [dict(log_row) for log_row in logs]
+        # Recent task "calls": the request + model response + per-provider attempt
+        # trace (with error bodies) so the Logs tab can show the full request->response
+        # back-and-forth and exactly WHY a provider failed (incl. masked fallback hops).
+        try:
+            call_rows = conn.execute(
+                "SELECT id, title, status, provider, model_id, output_data, error, "
+                "created_at, completed_at "
+                "FROM agent_tasks WHERE agent_id = ? "
+                "ORDER BY id DESC LIMIT 25",
+                (agent_id,),
+            ).fetchall()
+            calls_payload = [dict(r) for r in call_rows]
+            # The Brain reasons via a separate brain_invoke task (different table);
+            # fold those in so its terminal shows its real request->response decisions
+            # (and per-provider trace), not just the RAG recall lookups.
+            if agent_id == "brain":
+                brain_rows = conn.execute(
+                    "SELECT id, status, result, error, created_at, completed_at "
+                    "FROM tasks WHERE type='brain_invoke' ORDER BY id DESC LIMIT 25"
+                ).fetchall()
+                for r in brain_rows:
+                    d = dict(r)
+                    calls_payload.append({
+                        "id": d["id"],
+                        "title": f"Brain cycle #{d['id']}",
+                        "status": d["status"],
+                        "provider": None,
+                        "model_id": None,
+                        "output_data": d.get("result"),
+                        "error": d.get("error"),
+                        "created_at": d["created_at"],
+                        "completed_at": d.get("completed_at"),
+                    })
+                # Normalize the two created_at formats (ISO 'T' vs space) before sorting.
+                calls_payload.sort(
+                    key=lambda c: str(c.get("created_at") or "").replace("T", " ")[:19],
+                    reverse=True,
+                )
+                calls_payload = calls_payload[:40]
+        except Exception:
+            calls_payload = []
     details = inspect_agent(agent_id)
     return {
         "memory": docs.get("soul"),
         "documents": docs,
         "agent": details,
         "logs": logs_payload,
+        "calls": calls_payload,
     }
 
 
@@ -8729,9 +8901,59 @@ def _should_auto_trash_backtest_result(
     return False, ""
 
 
-def _estimate_backtest_bars(start: str | None, end: str | None, timeframe: str | None) -> int:
+# Each automated pipeline stage that runs a backtest maps to its own window setting.
+# stage_backtest_duration_days() resolves the effective window for a stage, treating a
+# stored value of 0/blank as "inherit the global Default backtest window".
+_STAGE_DURATION_SETTING_KEYS = {
+    "quick_screen": "quick_screen_duration_days",
+    "timeframe_sweep": "timeframe_sweep_duration_days",
+    "optimization": "optimization_duration_days",
+    "confirmation": "confirmation_duration_days",
+    "walk_forward": "walk_forward_duration_days",
+    "cost_stress": "cost_stress_duration_days",
+    "evolution": "evolution_duration_days",
+}
+
+
+def stage_backtest_duration_days(stage_key: str, settings: dict | None = None) -> int:
+    """Resolve the backtest window (calendar days) for a pipeline STAGE.
+
+    Each stage has its own tunable knob (e.g. quick_screen_duration_days). A stored
+    value of 0 / blank means "inherit the global Default backtest window"
+    (backtest_duration_days). Always returns a positive int.
+    """
+    s = settings if isinstance(settings, dict) else get_settings()
+    try:
+        global_default = int(
+            s.get("backtest_duration_days", DEFAULT_BACKTEST_DURATION_DAYS)
+            or DEFAULT_BACKTEST_DURATION_DAYS
+        )
+    except (TypeError, ValueError):
+        global_default = DEFAULT_BACKTEST_DURATION_DAYS
+    key = _STAGE_DURATION_SETTING_KEYS.get(str(stage_key or "").strip())
+    if key is not None:
+        raw = s.get(key)
+        if raw not in (None, "", 0, "0"):
+            try:
+                stage_val = int(raw)
+            except (TypeError, ValueError):
+                stage_val = 0
+            if stage_val > 0:
+                return stage_val
+    return max(1, global_default)
+
+
+def _estimate_backtest_bars(
+    start: str | None,
+    end: str | None,
+    timeframe: str | None,
+    duration_days_override: int | None = None,
+) -> int:
     settings = get_settings()
-    duration_days = int(settings["backtest_duration_days"])
+    if duration_days_override and int(duration_days_override) > 0:
+        duration_days = int(duration_days_override)
+    else:
+        duration_days = int(settings.get("backtest_duration_days", DEFAULT_BACKTEST_DURATION_DAYS) or DEFAULT_BACKTEST_DURATION_DAYS)
     minutes_per_bar = max(_timeframe_to_minutes(timeframe), 1)
     default_bars = (duration_days * 24 * 60) // minutes_per_bar
 
@@ -9619,9 +9841,9 @@ def _persist_completed_backtest_run(
         submit_end = now_iso
     if not submit_start:
         try:
-            duration_days = int(settings.get("backtest_duration_days", 365) or 365)
+            duration_days = int(settings.get("backtest_duration_days", DEFAULT_BACKTEST_DURATION_DAYS) or DEFAULT_BACKTEST_DURATION_DAYS)
         except Exception:
-            duration_days = 365
+            duration_days = DEFAULT_BACKTEST_DURATION_DAYS
         try:
             submit_end_dt = datetime.fromisoformat(submit_end.replace("Z", "+00:00"))
         except Exception:
@@ -10264,9 +10486,9 @@ def _is_canonical_backtest_submit(
     # spans ~backtest_duration_days. Anything else (short or back-shifted
     # windows) is a custom run.
     try:
-        duration_days = float(settings.get("backtest_duration_days", 365) or 365)
+        duration_days = float(settings.get("backtest_duration_days", DEFAULT_BACKTEST_DURATION_DAYS) or DEFAULT_BACKTEST_DURATION_DAYS)
     except (TypeError, ValueError):
-        duration_days = 365.0
+        duration_days = float(DEFAULT_BACKTEST_DURATION_DAYS)
     now = datetime.now(timezone.utc)
 
     def _parse_window_ts(value: str) -> datetime:
@@ -10367,7 +10589,7 @@ def post_backtest_submit(body: BacktestSubmitBody, *, skip_auto_trash: bool = Fa
     default_backtest_timeframe = str(settings.get("backtest_timeframe") or "1h").strip() or "1h"
     asset = _extract_base_asset_symbol(body.symbol, resolved_symbol)
     timeframe = str(body.timeframe or resolved_timeframe or default_backtest_timeframe or "1h").strip() or "1h"
-    bars = _estimate_backtest_bars(body.start, body.end, timeframe)
+    bars = _estimate_backtest_bars(body.start, body.end, timeframe, duration_days_override=body.duration_days)
     # Validate only the strategy's own params for genuinely-unenforced risk
     # fields. The body-level execution controls (stops/sizing) are now honoured
     # by the engine via execution_controls, so they must NOT be flagged here —
@@ -10467,9 +10689,9 @@ def post_backtest_submit(body: BacktestSubmitBody, *, skip_auto_trash: bool = Fa
         submit_end = now_iso
     if not submit_start:
         try:
-            duration_days = int(settings.get("backtest_duration_days", 365) or 365)
+            duration_days = int(body.duration_days) if body.duration_days and int(body.duration_days) > 0 else int(settings.get("backtest_duration_days", DEFAULT_BACKTEST_DURATION_DAYS) or DEFAULT_BACKTEST_DURATION_DAYS)
         except Exception:
-            duration_days = 365
+            duration_days = DEFAULT_BACKTEST_DURATION_DAYS
         try:
             submit_end_dt = datetime.fromisoformat(submit_end.replace("Z", "+00:00"))
         except Exception:
@@ -10691,7 +10913,7 @@ def post_optimization_submit(body: OptimizationSubmitBody):
 
     asset = _extract_base_asset_symbol(body.symbol, resolved_symbol)
     timeframe = str(body.timeframe or resolved_timeframe or "1h").strip() or "1h"
-    bars = _estimate_backtest_bars(body.start, body.end, timeframe)
+    bars = _estimate_backtest_bars(body.start, body.end, timeframe, duration_days_override=body.duration_days)
 
     # Generate IDs up front so we can return immediately.
     job_id = f"opt_{uuid4().hex[:12]}"
@@ -10703,9 +10925,9 @@ def post_optimization_submit(body: OptimizationSubmitBody):
     opt_end_placeholder = str(body.end or "").strip() or now_iso
     if not opt_start_placeholder:
         try:
-            duration_days = int(get_settings().get("backtest_duration_days", 365) or 365)
+            duration_days = int(body.duration_days) if body.duration_days and int(body.duration_days) > 0 else int(get_settings().get("backtest_duration_days", DEFAULT_BACKTEST_DURATION_DAYS) or DEFAULT_BACKTEST_DURATION_DAYS)
         except Exception:
-            duration_days = 365
+            duration_days = DEFAULT_BACKTEST_DURATION_DAYS
         try:
             end_dt = datetime.fromisoformat(opt_end_placeholder.replace("Z", "+00:00"))
         except Exception:

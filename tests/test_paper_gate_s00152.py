@@ -127,30 +127,30 @@ def test_profit_factor_above_2_0_passes_normally(forven_db):
 
 
 # ---------------------------------------------------------------------------
-# S00152: Extended paper trading (min 50 trades)
+# S00152: Extended paper trading (min closed-trades floor; Default preset = 10)
 # ---------------------------------------------------------------------------
 
 
 def test_insufficient_paper_trades_rejects(forven_db):
-    """Fewer than 50 paper trades should be rejected."""
+    """Fewer than the Default min_closed_trades (10) should be rejected."""
     with get_db() as conn:
         _insert_strategy(conn, "s-few-trades", metrics={"profit_factor": 3.0})
-        _insert_paper_trades(conn, "s-few-trades", [1.0] * 30)
+        _insert_paper_trades(conn, "s-few-trades", [1.0] * 5)
 
     passed, msg = _evaluate_paper_gate("s-few-trades", DEFAULT_PIPELINE_CONFIG)
     assert not passed
-    assert "30/50" in msg
+    assert "5/10" in msg
 
 
 def test_insufficient_paper_sample_precedes_static_pf_reject(forven_db):
     """Forward paper evidence should block before static PF hard-fails."""
     with get_db() as conn:
         _insert_strategy(conn, "s-few-trades-low-pf", metrics={"profit_factor": 1.2})
-        _insert_paper_trades(conn, "s-few-trades-low-pf", [1.0] * 30)
+        _insert_paper_trades(conn, "s-few-trades-low-pf", [1.0] * 5)
 
     passed, msg = _evaluate_paper_gate("s-few-trades-low-pf", DEFAULT_PIPELINE_CONFIG)
     assert not passed
-    assert msg == "Insufficient paper sample: 30/50 closed trades"
+    assert msg == "Insufficient paper sample: 5/10 closed trades"
 
 
 def test_exactly_50_trades_passes(forven_db):

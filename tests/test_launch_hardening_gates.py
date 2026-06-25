@@ -67,7 +67,7 @@ def test_quick_screen_rejects_low_trade_count(forven_db):
     passed, msg = _evaluate_quick_screen_gate("qs-few", load_pipeline_config())
     assert not passed
     assert "statistically meaningless" in msg
-    assert "30 minimum" in msg
+    assert "20 minimum" in msg  # Default preset quick_screen.min_trades relaxed 30 -> 20
 
 
 def test_quick_screen_min_trades_clears_at_sufficient_sample(forven_db):

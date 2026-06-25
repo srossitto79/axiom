@@ -114,23 +114,23 @@ export const connectedProviderIds: Readable<Set<string>> = derived(connectedProv
 );
 
 /**
- * Model options SELECTABLE anywhere: any model whose provider is CONNECTED.
+ * Model options SELECTABLE anywhere: a model whose provider is CONNECTED *and*
+ * that the operator has ENABLED in the Models tab.
  *
- * Selectability is gated on the provider being connected (authorized spend) —
- * NOT on the model also being ticked in the Models enable-list. An agent's own
- * model is a valid selection on any connected provider (the backend's
- * allowed_pairs already treats agent/routing selections as allowed regardless
- * of the enable-list), so requiring "enabled" too would falsely flag working
- * models as unavailable. Enabled models are surfaced first as a convenience.
+ * This is the page-wide safety invariant the rest of the UI promises everywhere
+ * ("limited to connected providers and enabled models"): ticking a model in the
+ * Models tab is exactly what makes it appear in the agent/routing pickers, and
+ * un-ticking it removes it. Previously this returned every connected-provider
+ * model (enabled ones merely sorted first), so enabling one model did NOT narrow
+ * the pickers — the un-enabled models kept showing up, which reads as the enable
+ * list doing the opposite of what it says.
+ *
+ * Honoring the enable-list here never strands a working pick: ModelPicker still
+ * renders an agent's CURRENT saved model even when it's absent from this set, and
+ * only flags it when its *provider* is disconnected (not merely un-enabled).
  */
 export const selectableModelOptions: Readable<ForvenAgentModelOption[]> = derived(
 	[store, connectedProviderIds],
-	([$s, $ids]) => {
-		const connected = $s.modelOptions.filter((o) => $ids.has(String(o.provider)));
-		// Enabled-first ordering (stable) so curated models surface at the top.
-		return [
-			...connected.filter((o) => $s.enabledKeys.has(o.key)),
-			...connected.filter((o) => !$s.enabledKeys.has(o.key)),
-		];
-	}
+	([$s, $ids]) =>
+		$s.modelOptions.filter((o) => $ids.has(String(o.provider)) && $s.enabledKeys.has(o.key))
 );

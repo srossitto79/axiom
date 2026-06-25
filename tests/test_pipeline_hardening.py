@@ -1412,6 +1412,13 @@ def test_evaluate_promotion_accepts_persisted_validation_artifacts_for_paper(for
 
 
 def test_evaluate_promotion_blocks_failed_required_verdict_tests_for_paper(forven_db):
+    # cost_stress is advisory at the gauntlet->paper gate in the Default preset
+    # (deferred to paper->live); explicitly require it here to exercise the
+    # failed-REQUIRED-verdict hard block.
+    kv_set(
+        "forven:pipeline_thresholds",
+        {"gauntlet": {"required_tests": ["walk_forward", "param_jitter", "cost_stress"]}},
+    )
     _insert_strategy(
         "s-gauntlet-failed-verdict",
         stage="gauntlet",

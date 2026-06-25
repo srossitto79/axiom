@@ -16,9 +16,18 @@ from forven.util import normalize_stage
 log = logging.getLogger("forven.policy")
 
 DEFAULT_PIPELINE_CONFIG = {
+    # Active stance preset (relaxed | default | strict | custom). The Default preset
+    # IS this DEFAULT_PIPELINE_CONFIG; relaxed/strict are deltas applied in
+    # _apply_pipeline_preset. "custom" = per-knob KV overrides used as-is.
+    "pipeline_preset": "default",
     "testing_mode": False,
     "quick_screen": {
-        "lookback_days": 365,
+        # NOTE: the quick-screen backtest WINDOW is not set here. Every automatic
+        # backtest (quick-screen, gauntlet optimize/confirm, walk-forward, cost-stress,
+        # evolution validation) shares ONE window: the app setting
+        # `backtest_duration_days` (Settings > Lab > "Backtest window"). The old
+        # quick_screen.lookback_days knob was read by nothing — removed so the config
+        # stops implying a per-stage window that never existed.
         "min_total_return_pct": 0.0,
         "max_drawdown_pct": 0.30,
         "min_sharpe": 0.0,
@@ -33,15 +42,17 @@ DEFAULT_PIPELINE_CONFIG = {
         # (win>70% AND PF<1.5) in brain.py still catches martingale-style curves.
         "min_win_rate": 0.0,          # Gate 4: win-rate floor off (was 0.45)
         # S00552 PF floor enforced at BOTH IS and OOS in the quick-screen gate.
-        # 1.05 matches the previously-hardcoded floor (M-15 2026-06-09 audit:
-        # the knob existed but the gate ignored it and enforced 1.05 anyway).
-        "min_profit_factor": 1.05,
+        # Default preset relaxes to 1.0 — keep only a "not a clear loser" screen at
+        # the cheapest triage; the Strict preset restores 1.1. (M-15 2026-06-09.)
+        "min_profit_factor": 1.0,
         # Guardrail floors that were previously HARDCODED fallbacks inside
-        # brain._quick_screen_overfitting_guardrails (Gate5/Gate3) — invisible to
-        # the Settings page, so "relaxing the requirements" never touched the two
-        # gates that actually bound. Defaults match the old hardcoded values.
-        "min_trades": 30,
-        "min_robustness_score": 50,
+        # brain._quick_screen_overfitting_guardrails (Gate5/Gate3). Now preset-driven.
+        # Default preset relaxes the entry sample to 20 and DROPS the quick-screen
+        # robustness floor to 0: the composite robustness score is EARNED inside the
+        # gauntlet (MC/jitter/WFA), so a non-zero floor at quick-screen time is a
+        # catch-22 that empties the funnel. Strict preset restores 30 / 40.
+        "min_trades": 20,
+        "min_robustness_score": 0,
         # Fitness-scorer scaling knobs (score_strategy). Previously hardcoded as
         # min_trades_limit=20 / min_pf_limit=1.3 — now wired so the fitness curve
         # is tunable. Defaults preserve the historical scaling exactly.
@@ -58,21 +69,27 @@ DEFAULT_PIPELINE_CONFIG = {
         "max_plausible_profit_factor": 8.0,
     },
     "gauntlet": {
-        "optimization_years": 2,
+        # NOTE: the optimize/confirm WINDOW = the global `backtest_duration_days`
+        # setting (see quick_screen note above). The old gauntlet.optimization_years
+        # knob was read by nothing — removed.
         # "strict live, achievable paper": the gauntlet->paper gate stays
         # reachable in adverse regimes (so the funnel is visibly active) while
         # still rejecting clear losers — min_total_return stays >= 0, PF >= 1.05,
         # and walk_forward is required. The paper->live gate (paper_trading.*)
         # carries the strict forward-edge floors.
-        "min_robustness_score": 50,
+        "min_robustness_score": 30,
         "min_total_return_pct": 0.0,
         "max_drawdown_pct": 0.30,
         "min_win_rate": 0.0,
         # Win-rate is OFF as a gauntlet hard gate by default (see quick_screen note);
         # flip on only if you specifically want a win-rate floor at this stage.
         "gauntlet_enforce_win_rate": False,
-        "min_trades": 30,
+        "min_trades": 20,
         "min_sharpe": 0.1,
+        # Hard IS-Sharpe sanity floor — was a hardcoded 0.3 auto-reject in
+        # brain._gauntlet_entry_guardrails that no Settings knob could relax. Now
+        # wired: Default 0.0 (reject only genuinely negative IS edge), Strict 0.3.
+        "hard_min_is_sharpe": 0.0,
         # S00552 OOS profit-factor floor at the gauntlet->paper gate. 1.05 matches
         # the previously-hardcoded floor (M-15 2026-06-09 audit).
         "min_oos_profit_factor": 1.05,
@@ -86,8 +103,11 @@ DEFAULT_PIPELINE_CONFIG = {
         # poll wedging the workflow forever (the step heartbeat hides it from
         # stale-step recovery).
         "async_result_max_age_minutes": 60,
-        # P1-8: Minimum required gauntlet tests enforced by default.
-        "required_tests": ["walk_forward", "param_jitter", "cost_stress"],
+        # P1-8: Minimum required gauntlet tests. Default preset requires the two
+        # cheap overfitting probes (walk_forward = OOS consistency, param_jitter =
+        # parameter stability); cost_stress is a strict-LIVE concern deferred to the
+        # paper->live gate. Strict preset re-adds cost_stress here.
+        "required_tests": ["walk_forward", "param_jitter"],
         # P1-9: Walk-forward hard-pass thresholds
         "wfa_max_degradation": 0.35,
         "wfa_min_oos_trades": 20,
@@ -116,7 +136,7 @@ DEFAULT_PIPELINE_CONFIG = {
         # Recalibrated 0.70 -> 0.60: at n~30 reruns a 70% pass-rate has ~8% standard
         # error, so 70% was statistically indistinguishable from 67% — not a
         # meaningful bar. 60% still requires majority stability.
-        "param_jitter_pass_rate_min": 0.60,
+        "param_jitter_pass_rate_min": 0.50,
         # Cost-stress max Sharpe degradation under 2x fees/slippage (live gate).
         # The edge must SURVIVE higher costs, not just clear an absolute floor.
         "cost_stress_max_degradation_pct": 60.0,
@@ -143,7 +163,7 @@ DEFAULT_PIPELINE_CONFIG = {
         # count as passed at the capital gate. Wired so it can be loosened in adverse regimes.
         # 0.40 = 2/5 folds positive: achievable-paper while still requiring multi-fold
         # consistency (not a single lucky fold). The strict paper->live gate enforces edge.
-        "wfa_fold_pass_rate_min": 0.40,
+        "wfa_fold_pass_rate_min": 0.33,
         # Minimum OOS trades a walk-forward fold must have to count toward the
         # fold pass-rate. Near-empty folds (a trend system sitting out a flat
         # window) are excluded from BOTH numerator and denominator so they can't
@@ -161,7 +181,7 @@ DEFAULT_PIPELINE_CONFIG = {
     },
     "paper_trading": {
         "min_paper_days": 14,
-        "min_closed_trades": 50,
+        "min_closed_trades": 10,
         "min_total_return_pct": 0.0,
         "max_drawdown_pct": 0.15,
         # "strict live": enforce the full robustness battery (WFA degradation /
@@ -198,7 +218,84 @@ DEFAULT_PIPELINE_CONFIG = {
         ],
         "decay_kill_switch_pct": 0.30,
     },
+    # Absolute anti-bypass floors clamped onto the promotion gates. FULLY EDITABLE —
+    # these bound how far a relaxed preset / custom config / automated caller can
+    # soften the path, but the operator can change them from Settings. Set a floor to
+    # 0 (or a *_max_* ceiling to 1.0) to remove that rail entirely. paper_entry keys
+    # clamp the gauntlet->paper gate (no real capital); live_* clamp the paper->live
+    # (real money) gate — loosen those with care.
+    "safety_floors": {
+        "min_trades": 3,
+        "min_robustness_score": 0.0,
+        "mc_max_dd_p95": 0.50,
+        "wfa_fold_pass_rate_min": 0.20,
+        "param_jitter_pass_rate_min": 0.30,
+        "live_min_closed_trades": 3,
+        "live_max_drawdown_pct": 0.25,
+    },
 }
+
+# --- Stance presets -------------------------------------------------------------
+# "achievable paper, strict live": presets relax the path TO paper (no real capital
+# at risk there) while the paper->live gate (paper_trading.*) stays the real filter.
+# The Default preset == DEFAULT_PIPELINE_CONFIG, so it carries no deltas. Relaxed and
+# Strict override specific knobs. Anything a preset (or custom config) sets is still
+# clamped by the absolute anti-bypass floors (_PAPER_GATE_FLOORS for ->paper, and the
+# inline live floors in _evaluate_paper_gate), so no preset can admit a 0-trade or
+# 80%-drawdown strategy.
+PIPELINE_PRESETS = {
+    "default": {},
+    "relaxed": {
+        "quick_screen": {"min_trades": 5, "min_robustness_score": 0, "min_profit_factor": 1.0},
+        "gauntlet": {
+            "min_trades": 5,
+            "min_sharpe": 0.0,
+            "hard_min_is_sharpe": 0.0,
+            "min_robustness_score": 20,
+            "required_tests": ["walk_forward"],
+        },
+        "robustness_thresholds": {"wfa_fold_pass_rate_min": 0.25, "param_jitter_pass_rate_min": 0.40},
+        "paper_trading": {
+            "min_closed_trades": 5,
+            "min_paper_days": 7,
+            "min_paper_sharpe": 0.0,
+            "min_profit_factor_live": 1.2,
+        },
+    },
+    "strict": {
+        "quick_screen": {"min_trades": 30, "min_robustness_score": 40, "min_profit_factor": 1.1, "min_is_sharpe": 0.2},
+        "gauntlet": {
+            "min_trades": 30,
+            "min_sharpe": 0.5,
+            "hard_min_is_sharpe": 0.3,
+            "min_robustness_score": 50,
+            "required_tests": ["walk_forward", "param_jitter", "cost_stress"],
+        },
+        "robustness_thresholds": {"wfa_fold_pass_rate_min": 0.50, "param_jitter_pass_rate_min": 0.60},
+        "paper_trading": {
+            "min_closed_trades": 50,
+            "min_paper_days": 21,
+            "min_paper_sharpe": 1.0,
+            "min_profit_factor_live": 1.5,
+        },
+    },
+}
+
+
+def _apply_pipeline_preset(merged: dict, preset_name: object) -> None:
+    """Deep-merge a stance preset's deltas into ``merged`` in place (one level deep,
+    matching _normalize_pipeline_config's own section merge). Unknown names and
+    "default"/"custom" leave the base untouched so per-knob KV overrides win as-is."""
+    name = str(preset_name or "default").strip().lower()
+    deltas = PIPELINE_PRESETS.get(name)
+    if not deltas:
+        return
+    for section, knobs in deltas.items():
+        if isinstance(knobs, dict) and isinstance(merged.get(section), dict):
+            merged[section].update(knobs)
+        else:
+            merged[section] = knobs
+
 
 _GAUNTLET_VERDICT_ALIASES = {
     "parameter_stability": "param_jitter",
@@ -235,6 +332,13 @@ _RATIO_THRESHOLD_PATHS = (
     # may enter 40 / 0.40 (or 60 / 0.60) interchangeably for the gauntlet->paper gate.
     ("gauntlet", "mc_max_dd_p95"),
     ("robustness_thresholds", "param_jitter_pass_rate_min"),
+    # safety_floors ratio rails — accept percent (40) or fraction (0.40) like the gate
+    # twins above, so a percent-habit entry can't store a raw 40 and silently no-op a
+    # rail (incl. the real-money live_max_drawdown_pct ceiling).
+    ("safety_floors", "mc_max_dd_p95"),
+    ("safety_floors", "wfa_fold_pass_rate_min"),
+    ("safety_floors", "param_jitter_pass_rate_min"),
+    ("safety_floors", "live_max_drawdown_pct"),
     # Legacy keys preserved for backward compatibility.
     ("paper_gate", "max_drawdown_pct"),
     ("retirement", "max_drawdown_pct"),
@@ -296,6 +400,10 @@ def _normalize_pipeline_config(config: dict | None) -> dict:
     merged = copy.deepcopy(DEFAULT_PIPELINE_CONFIG)
     raw = config if isinstance(config, dict) else {}
 
+    # Apply the stance preset over DEFAULT first (handles a sparse config that carries
+    # only pipeline_preset, e.g. a fresh selection with no materialized knobs).
+    _apply_pipeline_preset(merged, raw.get("pipeline_preset"))
+
     for key, val in raw.items():
         if isinstance(val, dict) and key in merged and isinstance(merged[key], dict):
             merged[key].update(val)
@@ -353,6 +461,20 @@ def _normalize_pipeline_config(config: dict | None) -> dict:
         merged["live_graduated"] = live_graduated
     if legacy_decay and "degradation_threshold" in legacy_decay:
         live_graduated["decay_kill_switch_pct"] = legacy_decay.get("degradation_threshold")
+
+    # Named-preset AUTHORITY: a deliberately-chosen stance (relaxed/strict) must win
+    # over a fully-materialized stored knob snapshot. load_pipeline_config self-heals
+    # the KV to a complete dict (incl. the legacy deploy_gate alias) and the Settings
+    # save round-trips the whole config, so the raw overlay AND the legacy back-mapping
+    # above otherwise clobber the preset deltas and make the selector INERT (picking
+    # Strict would store the stance but keep running the looser values). Re-apply the
+    # deltas HERE — after the legacy paper_gate/deploy_gate mapping — so the preset
+    # takes effect end-to-end (incl. the deploy_gate alias republished below).
+    # 'default'/'custom'/absent leave the raw per-knob values winning, so manual edits
+    # stick (the UI flips the selector to "custom" the moment a knob is edited).
+    _preset_name = str(raw.get("pipeline_preset") or "").strip().lower()
+    if _preset_name in ("relaxed", "strict"):
+        _apply_pipeline_preset(merged, _preset_name)
 
     for section, field in _RATIO_THRESHOLD_PATHS:
         section_payload = merged.get(section, {})
@@ -2821,7 +2943,7 @@ def _evaluate_quick_screen_gate(strategy_id: str, config: dict) -> tuple[bool, s
     S00552 GUARDRAILS (Hard Gates at Gauntlet Entry):
     1. IS/OOS Sharpe Gap Limit: Reject if gap > 1.5 points
     2. Pre-Gauntlet Robustness Gate: Require robustness ≥ 10/100 BEFORE gauntlet progression
-    3. Profit Factor Floor: Require PF >= quick_screen.min_profit_factor (default 1.05)
+    3. Profit Factor Floor: Require PF >= quick_screen.min_profit_factor (default 1.0)
        at BOTH IS and OOS stages
     4. Win Rate Trap Detection: Reject if WR > 60% but PF < 1.0
     """
@@ -3093,9 +3215,29 @@ def _strict_robustness_reject(strategy_id: str, row, metrics: dict, config: dict
             return f"Live gate: Monte-Carlo percentile {float(pct):.0%} below {mc_min:.0%} target"
 
     cost = verdict_payloads.get("cost_stress")
-    if isinstance(cost, dict):
-        # Reworked: gate on SURVIVAL (positive stressed Sharpe) AND bounded degradation,
-        # not just an absolute floor.
+    cost_unusable = (
+        not isinstance(cost, dict)
+        or bool(cost.get("non_required_failure"))
+        or (cost.get("stressed_sharpe") is None and cost.get("degradation_pct") is None)
+    )
+    # FAIL CLOSED on a missing/errored cost_stress — but ONLY when the strategy actually
+    # ran the gauntlet (walk_forward present, since it is a required test). cost_stress is
+    # non-required at the gauntlet->paper gate (Default preset "achievable paper, strict
+    # live"), so an ERRORED probe (gauntlet._non_required_skip) leaves no usable survival
+    # result here; without this guard the cost-survival checks below silently no-op and a
+    # strategy whose edge does NOT survive 2x fees/slippage could graduate to REAL MONEY.
+    # Gating on wfa avoids over-blocking direct/test promotions that carry no gauntlet
+    # validations at all (cost would also be absent there, but for a benign reason). This
+    # runs only when live_strict_robustness_enabled, so failing closed is safe: the
+    # strategy stays in paper, no capital at risk, until a clean cost-stress result exists.
+    if isinstance(wfa, dict) and cost_unusable:
+        return (
+            "Live gate: cost-stress survival could not be verified (no usable cost_stress "
+            "result) — failing closed before real capital"
+        )
+    # Gate on SURVIVAL (positive stressed Sharpe) AND bounded degradation, not just an
+    # absolute floor.
+    if isinstance(cost, dict) and not cost_unusable:
         ss = cost.get("stressed_sharpe")
         cmin = float(rob.get("cost_stress_min_sharpe", 0.3))
         if ss is not None and float(ss) < cmin:
@@ -3115,17 +3257,20 @@ def _strict_robustness_reject(strategy_id: str, row, metrics: dict, config: dict
     return None
 
 
-# F2 (2026-06-15 bypass fix): immutable floors for the capital-bearing
-# gauntlet->paper gate. Pipeline config may make these gates STRICTER but never
-# looser — this closes the agent config-relaxation bypass where the same evidence
-# the strict gauntlet rejected passed under a relaxed policy. Limits where
-# lower==stricter (drawdown) are capped from above; the rest are floored.
+# DEFAULT values for the editable config["safety_floors"] — the absolute anti-bypass
+# floors clamped onto the capital-bearing gauntlet->PAPER entry gate. They bound how
+# far a relaxed preset / custom config / automated caller can soften the ->paper path
+# (a relaxed value is clamped to these; where lower==stricter, e.g. drawdown, the cap
+# is from above). UPDATED 2026-06-24: these are NO LONGER immutable — they are the
+# DEFAULTS for config["safety_floors"], which is fully operator-editable from Settings
+# (set any to 0 to remove that rail). Entry to PAPER risks no real capital; the
+# real-money floors are safety_floors.live_*.
 _PAPER_GATE_FLOORS = {
-    "min_robustness_score": 50.0,
-    "mc_max_dd_p95": 0.40,  # ceiling: DD limit cannot be relaxed above 40%
-    "wfa_fold_pass_rate_min": 0.40,
-    "param_jitter_pass_rate_min": 0.60,
-    "min_trades": int(DEFAULT_PIPELINE_CONFIG["gauntlet"]["min_trades"]),  # = 30
+    "min_robustness_score": 0.0,
+    "mc_max_dd_p95": 0.50,  # ceiling: tail DD can never be relaxed above 50%
+    "wfa_fold_pass_rate_min": 0.20,
+    "param_jitter_pass_rate_min": 0.30,
+    "min_trades": 3,
 }
 
 
@@ -3137,6 +3282,10 @@ def _evaluate_gauntlet_gate(strategy_id: str, config: dict) -> tuple[bool, str]:
     - Monte Carlo MaxDD: Ensure 95th percentile DD < 25% before progression
     """
     gate = config.get("gauntlet", {})
+    # Editable absolute floors (defaults from _PAPER_GATE_FLOORS) clamp how far a
+    # relaxed preset / custom config can soften this ->paper gate.
+    floors = dict(_PAPER_GATE_FLOORS)
+    floors.update({k: v for k, v in (config.get("safety_floors") or {}).items() if k in floors})
     required = gate.get("required_tests", []) or []
     required_tests = {_canonicalize_gauntlet_verdict_test(t) for t in required if str(t).strip()}
     enforce_all_verdict_tests = not required_tests
@@ -3181,11 +3330,13 @@ def _evaluate_gauntlet_gate(strategy_id: str, config: dict) -> tuple[bool, str]:
     # Carlo block below, so a strategy that reached this gate without an MC artifact
     # (e.g. a non-workflow api/system ->paper promotion) was never checked, and a
     # handful of <10-trade strategies slipped through to paper. Enforce it here for
-    # every ->paper promotion, clamped to the immutable _PAPER_GATE_FLOORS floor so
-    # a relaxed gauntlet.min_trades config cannot soften it below the design default.
+    # every ->paper promotion, clamped to the editable safety_floors.min_trades floor
+    # (default 3) so a relaxed gauntlet.min_trades config cannot soften it below that
+    # operator-set rail. (The old immutable 30 is now a low, tunable "achievable paper"
+    # floor — entry to paper risks no real capital.)
     sample_min_trades = max(
-        int(_coerce_float(gate.get("min_trades", _PAPER_GATE_FLOORS["min_trades"]), _PAPER_GATE_FLOORS["min_trades"])),
-        _PAPER_GATE_FLOORS["min_trades"],
+        int(_coerce_float(gate.get("min_trades", floors["min_trades"]), floors["min_trades"])),
+        floors["min_trades"],
     )
     sample_trades = _resolve_full_sample_trade_count(metrics)
     if sample_trades is None:
@@ -3256,7 +3407,7 @@ def _evaluate_gauntlet_gate(strategy_id: str, config: dict) -> tuple[bool, str]:
                     required_robustness,
                 )
 
-    min_robustness = max(float(gate.get("min_robustness_score", 50)), _PAPER_GATE_FLOORS["min_robustness_score"])  # F2 floor
+    min_robustness = max(float(gate.get("min_robustness_score", 50)), floors["min_robustness_score"])  # F2 floor
     if robustness < min_robustness:
         return False, f"Gauntlet robustness too low: {robustness:.1f}/100 (minimum {min_robustness:.1f})"
 
@@ -3303,7 +3454,7 @@ def _evaluate_gauntlet_gate(strategy_id: str, config: dict) -> tuple[bool, str]:
                     DEFAULT_PIPELINE_CONFIG["robustness_thresholds"]["wfa_fold_pass_rate_min"],
                 )
             ),
-            _PAPER_GATE_FLOORS["wfa_fold_pass_rate_min"],  # F2 floor
+            floors["wfa_fold_pass_rate_min"],  # F2 floor
         )
         if enforce_wfa and wfa_pass_rate < min_pass_rate:
             return False, f"S00552 REJECT: Walk-forward pass rate {wfa_pass_rate:.0%} below {min_pass_rate:.0%} minimum"
@@ -3318,14 +3469,14 @@ def _evaluate_gauntlet_gate(strategy_id: str, config: dict) -> tuple[bool, str]:
     
     # S00552: Monte Carlo MaxDD - 95th percentile DD check (configurable via gauntlet.mc_max_dd_p95)
     mc_payload = verdict_payloads.get("monte_carlo") or verdict_payloads.get("mc")
-    mc_dd_limit = min(float(gate.get("mc_max_dd_p95", 0.40)), _PAPER_GATE_FLOORS["mc_max_dd_p95"])  # F2 ceiling
+    mc_dd_limit = min(float(gate.get("mc_max_dd_p95", 0.40)), floors["mc_max_dd_p95"])  # F2 ceiling
     # Hard SAFETY FLOORS (baseline-trade count + 95th-percentile drawdown) fire whenever
     # Monte Carlo actually ran — NOT only when monte_carlo is in required_tests. A measured
     # 60% tail drawdown is a real risk signal regardless of operator config. The soft
     # percentile *calibration band* below stays gated behind required_tests.
     if mc_payload:
         mc_trades = mc_payload.get("n_trades", mc_payload.get("trade_count", mc_payload.get("total_trades")))
-        mc_min_trades = max(int(gate.get("min_trades", DEFAULT_PIPELINE_CONFIG["gauntlet"]["min_trades"]) or 1), _PAPER_GATE_FLOORS["min_trades"])  # F2 floor
+        mc_min_trades = max(int(gate.get("min_trades", DEFAULT_PIPELINE_CONFIG["gauntlet"]["min_trades"]) or 1), floors["min_trades"])  # F2 floor
         if mc_trades is not None and int(float(mc_trades or 0)) < mc_min_trades:
             return False, (
                 f"S00552 REJECT: Monte Carlo baseline has {int(float(mc_trades or 0))} trades, "
@@ -3341,7 +3492,7 @@ def _evaluate_gauntlet_gate(strategy_id: str, config: dict) -> tuple[bool, str]:
     jitter_payload = verdict_payloads.get("param_jitter")
     if jitter_payload:  # F4(b): fire whenever param_jitter ran, regardless of required_tests
         jitter_rate = jitter_payload.get("pass_rate", jitter_payload.get("stable_pct"))
-        jitter_min = max(float(rob_thresholds.get("param_jitter_pass_rate_min", 0.60)), _PAPER_GATE_FLOORS["param_jitter_pass_rate_min"])  # F2 floor
+        jitter_min = max(float(rob_thresholds.get("param_jitter_pass_rate_min", 0.60)), floors["param_jitter_pass_rate_min"])  # F2 floor
         if jitter_rate is not None and float(jitter_rate) < jitter_min:
             return False, (
                 f"P25-4 REJECT: Parameter jitter pass rate {float(jitter_rate):.1%} "
@@ -3478,6 +3629,9 @@ def _evaluate_paper_gate(strategy_id: str, config: dict) -> tuple[bool, str]:
     """
     gate = config.get("paper_trading", {})
     _pt_defaults = DEFAULT_PIPELINE_CONFIG["paper_trading"]
+    # Editable absolute live (real-money) floors. Defaults are safe; an operator can
+    # lower them from Settings (full control, no fixed backstop — loosen with care).
+    _floors = config.get("safety_floors") or {}
     row = _load_strategy_row_for_gate(strategy_id)
     if not row:
         return False, "Strategy not found"
@@ -3537,9 +3691,16 @@ def _evaluate_paper_gate(strategy_id: str, config: dict) -> tuple[bool, str]:
     max_dd = float(live.get("max_drawdown_pct", 0.0))
 
     # S00152: Extended Paper Trading - min trades AND min days (both required)
-    min_trades = int(gate.get("min_closed_trades", _pt_defaults["min_closed_trades"]))
+    # Editable absolute live floors (safe defaults; fully operator-tunable).
+    min_trades = max(
+        int(gate.get("min_closed_trades", _pt_defaults["min_closed_trades"])),
+        int(_floors.get("live_min_closed_trades", 3)),
+    )
     min_return = float(gate.get("min_total_return_pct", _pt_defaults["min_total_return_pct"]))
-    max_dd_limit = float(gate.get("max_drawdown_pct", _pt_defaults["max_drawdown_pct"]))
+    max_dd_limit = min(
+        float(gate.get("max_drawdown_pct", _pt_defaults["max_drawdown_pct"])),
+        float(_floors.get("live_max_drawdown_pct", 0.25)),
+    )
 
     if total_trades < min_trades:
         return False, f"Insufficient paper sample: {total_trades}/{min_trades} closed trades"

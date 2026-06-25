@@ -20,7 +20,7 @@ log = logging.getLogger("forven.auth.store")
 
 LOCK_PATH = AUTH_FILE.with_suffix(".lock")
 REFRESH_BUFFER_MS = 5 * 60 * 1000  # 5 minutes before expiry
-_SUPPORTED_AUTH_PROVIDERS = {"openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek", "groq", "gemini", "cerebras", "mistral", "xai", "together"}
+_SUPPORTED_AUTH_PROVIDERS = {"openai", "minimax", "lmstudio", "zai", "openrouter", "anthropic", "deepseek", "groq", "gemini", "cerebras", "mistral", "xai", "together", "opencode-zen", "opencode-go"}
 _AUTH_SECRET_FIELDS = {"access", "refresh", "token", "id_token", "api_key", "api_secret"}
 
 # Runtime-only marker attached to a profile whose ciphertext could not be
@@ -48,6 +48,8 @@ _ENV_ACCESS_TOKEN_KEYS = {
     "mistral": ("MISTRAL_API_KEY",),
     "xai": ("XAI_API_KEY", "GROK_API_KEY"),
     "together": ("TOGETHER_API_KEY", "TOGETHER_AI_API_KEY"),
+    "opencode-zen": ("OPENCODE_ZEN_API_KEY", "OPENCODE_API_KEY"),
+    "opencode-go": ("OPENCODE_GO_API_KEY",),
 }
 _ENV_BASE_URL_KEYS = {
     "lmstudio": ("LMSTUDIO_BASE_URL",),
@@ -60,6 +62,8 @@ _ENV_BASE_URL_KEYS = {
     "mistral": ("MISTRAL_BASE_URL",),
     "xai": ("XAI_BASE_URL",),
     "together": ("TOGETHER_BASE_URL",),
+    "opencode-zen": ("OPENCODE_ZEN_BASE_URL",),
+    "opencode-go": ("OPENCODE_GO_BASE_URL",),
 }
 
 

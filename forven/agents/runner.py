@@ -24,7 +24,6 @@ from forven.async_utils import spawn
 from forven.context import build_agent_context
 from forven.cost_pricing import estimate_cost_usd
 from forven.db import claim_pending_agent_tasks, create_pending_task, format_prefixed_id, get_db, get_task_tool_calls, init_db, is_user_active, kv_get, kv_set, log_activity
-from forven.model_routing import get_fallback_chain
 from forven.provider_runtime_health import (
     record_call_failure,
     record_provider_event,
@@ -213,6 +212,7 @@ async def _call_with_tools(
     provider: str, model_id: str, messages: list[dict], system: str,
     tools: list[dict] | None = None,
     agent_id: str | None = None,
+    trace: list[dict] | None = None,
 ) -> tuple[str, dict]:
     """Call AI with tool support — implements the tool-call loop.
 
@@ -278,6 +278,12 @@ async def _call_with_tools(
 
     # Try each provider in the chain
     last_error = None
+    attempts: list[dict] = []
+
+    def _sync_trace() -> None:
+        if trace is not None:
+            trace[:] = attempts
+
     for chain_idx, (active_provider, active_model) in enumerate(chain):
         progress = {"tools_executed": False}
         try:
@@ -288,6 +294,8 @@ async def _call_with_tools(
             # Health is keyed on the provider that ACTUALLY ran — a working
             # fallback must never mark the (broken) primary healthy.
             record_provider_ok(active_provider)
+            attempts.append({"provider": active_provider, "model": active_model, "ok": True})
+            _sync_trace()
             if chain_idx > 0:
                 log.warning(
                     "Tool-call fallback succeeded: %s/%s (after %d failures)",
@@ -307,6 +315,23 @@ async def _call_with_tools(
             # Record against the provider that actually failed (not the agent's
             # configured primary) so the banner/Discord name the right provider.
             record_call_failure(active_provider, e)
+            # Capture this attempt WITH the response body so the primary's error
+            # (e.g. GLM) isn't masked by a later fallback's error (e.g. LM Studio),
+            # and log it per-attempt so it shows in the agent Logs tab immediately.
+            _detail = _error_detail(e)
+            attempts.append({
+                "provider": active_provider, "model": active_model,
+                "ok": False, "error": _detail[:2000],
+            })
+            _sync_trace()
+            if agent_id:
+                try:
+                    log_activity(
+                        "warning", f"agent:{agent_id}",
+                        f"AI call failed on {active_provider}/{active_model}: {_detail[:700]}",
+                    )
+                except Exception:
+                    pass
             if progress["tools_executed"]:
                 # The loop already executed at least one (potentially
                 # side-effecting) tool. Restarting on a fallback provider would
@@ -319,6 +344,10 @@ async def _call_with_tools(
                     "side-effecting tools): %s",
                     active_provider, active_model, e,
                 )
+                try:
+                    e.ai_attempts = attempts
+                except Exception:
+                    pass
                 raise
             if chain_idx < len(chain) - 1:
                 log.warning(
@@ -328,6 +357,10 @@ async def _call_with_tools(
             else:
                 log.error("All tool-call providers failed. Last error: %s", e)
 
+    try:
+        last_error.ai_attempts = attempts
+    except Exception:
+        pass
     raise last_error
 
 
@@ -518,6 +551,35 @@ def _exception_summary(error: Exception) -> str:
         if message:
             break
     return " | ".join(parts) if parts else type(error).__name__
+
+
+def _error_detail(error: Exception, body_limit: int = 4000) -> str:
+    """Like _exception_summary but APPENDS the provider's HTTP response BODY when
+    present — so a bare '400 Bad Request for url X' becomes the actual reason the
+    provider rejected the call (e.g. 'model not loaded', 'unknown parameter').
+
+    SECRET-REDACTED at the source (forven.redact): this string is persisted to
+    agent_tasks.output_data, surfaced in the Logs "calls" view, AND (via the
+    per-attempt log_activity warning) written to activity_log which live_ws.py
+    broadcasts over the live WebSocket — so a provider error body that echoes a
+    key/token must be scrubbed before it leaves this function. This is the single
+    chokepoint for every error-body consumer (trace, failure detail, the warning)."""
+    from forven.redact import redact
+
+    summary = _exception_summary(error)
+    detail = summary
+    for current in _walk_exception_chain(error):
+        response = getattr(current, "response", None)
+        if response is None:
+            continue
+        try:
+            body = str(getattr(response, "text", "") or "").strip()
+        except Exception:
+            body = ""
+        if body:
+            detail = f"{summary}\n{body[:body_limit]}"
+            break
+    return redact(detail)[0]
 
 
 def _requeue_agent_task(
@@ -1184,9 +1246,10 @@ async def _run_agent_task_inner(
                 )
                 provider, model_id = alt
         messages = [{"role": "user", "content": prompt}]
+        ai_trace: list[dict] = []
 
         response, usage = await _call_with_tools(
-            provider, model_id, messages, context, tools=agent_tools, agent_id=agent_id
+            provider, model_id, messages, context, tools=agent_tools, agent_id=agent_id, trace=ai_trace
         )
         cost_usd = estimate_cost_usd(provider, model_id, usage)
 
@@ -1204,6 +1267,12 @@ async def _run_agent_task_inner(
 
         # Save output
         output = {"response": response, "completed_at": datetime.now(timezone.utc).isoformat()}
+        # Request + per-provider attempt trace so the Logs tab can show the full
+        # request -> response back-and-forth (incl. any fallback hops).
+        from forven.redact import redact_dict
+        output["request"] = redact_dict({"system": (context or "")[:12000], "messages": messages})[0]
+        if ai_trace:
+            output["ai_trace"] = ai_trace
         if tool_trace:
             output["tool_trace"] = tool_trace
         if task_type == "phantom_repair" and strategy_id:
@@ -1423,6 +1492,28 @@ async def _run_agent_task_inner(
     except Exception as e:
         error_summary = _exception_summary(e)
         log.error("Agent %s task %d failed: %s", agent_id, task_id, error_summary, exc_info=True)
+        # Persist the request + per-provider attempt trace (with response bodies) so a
+        # FAILED task is diagnosable in the Logs tab — the primary's error (e.g. GLM)
+        # survives even when a configured fallback (e.g. LM Studio) masks it with its own.
+        try:
+            from forven.redact import redact_dict
+
+            _fail_trace = getattr(e, "ai_attempts", [])
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE agent_tasks SET output_data=? WHERE id=?",
+                    (json.dumps({
+                        "request": redact_dict({
+                            "title": task.get("title"),
+                            "description": task.get("description"),
+                            "input_data": input_data,
+                        })[0],
+                        "ai_trace": _fail_trace,
+                        "error_detail": _error_detail(e),
+                    }), task_id),
+                )
+        except Exception:
+            pass
 
         # Trade-execution tasks must NOT be auto-requeued on transient/rate-limit
         # errors: re-running the task can re-submit the order and open a duplicate

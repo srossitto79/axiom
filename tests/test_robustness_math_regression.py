@@ -21,9 +21,9 @@ def test_default_robustness_thresholds_are_stable():
     """
     thresholds = DEFAULT_PIPELINE_CONFIG["robustness_thresholds"]
     assert thresholds["monte_carlo_percentile_min"] == pytest.approx(0.65)
-    # Recalibrated 0.70 -> 0.60 (audit Phase 2): at n~30 reruns a 70% pass-rate is
-    # within ~1 standard error of 67%, so it wasn't a meaningful bar.
-    assert thresholds["param_jitter_pass_rate_min"] == pytest.approx(0.60)
+    # Default preset ("achievable paper") relaxes the param-jitter pass rate to 0.50;
+    # the Strict preset restores 0.60. Now a preset-/operator-tunable knob.
+    assert thresholds["param_jitter_pass_rate_min"] == pytest.approx(0.50)
     assert thresholds["cost_stress_min_sharpe"] == pytest.approx(0.3)
     assert thresholds["regime_split_profitable_min"] == pytest.approx(0.50)
 
@@ -36,9 +36,13 @@ def test_default_wfa_gate_thresholds_are_stable():
     # the strict paper->live gate instead. Intentionally lowered from 0.3.
     assert gauntlet["wfa_min_oos_sharpe"] == pytest.approx(0.0)
     assert gauntlet["wfa_min_folds"] == 2
-    # Required tests must include the three whose verdicts hard-gate paper entry.
+    # Default preset requires the two cheap overfitting probes; cost_stress is a
+    # strict-LIVE concern deferred to the paper->live gate (re-added by the Strict
+    # preset). walk_forward must always be present (the OOS gate, self-healed in
+    # _normalize_pipeline_config if a config ever drops it).
     required = set(gauntlet["required_tests"])
-    assert {"walk_forward", "param_jitter", "cost_stress"}.issubset(required)
+    assert {"walk_forward", "param_jitter"}.issubset(required)
+    assert "cost_stress" not in required  # Default no longer requires it pre-paper
 
 
 def test_load_pipeline_config_preserves_robustness_thresholds(forven_db):
@@ -129,7 +133,7 @@ def test_mc_percentile_fail_just_below_threshold():
 
 def test_param_jitter_pass_rate_boundaries():
     threshold = float(DEFAULT_PIPELINE_CONFIG["robustness_thresholds"]["param_jitter_pass_rate_min"])
-    assert threshold == pytest.approx(0.60)  # recalibrated from 0.70 (n~30 noise)
+    assert threshold == pytest.approx(0.50)  # Default preset; Strict restores 0.60
     # At exactly the threshold the router applies >= → passes; just below → fails.
     assert threshold >= threshold
     assert (threshold - 0.01) < threshold

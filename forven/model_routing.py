@@ -25,6 +25,8 @@ _SUPPORTED_PROVIDERS: tuple[str, ...] = (
     "mistral",
     "xai",
     "together",
+    "opencode-zen",
+    "opencode-go",
 )
 _MODEL_ROUTING_STORAGE_KEY = "forven:model-routing"
 _LEGACY_MODEL_ALIASES: dict[str, dict[str, str]] = {}
@@ -46,6 +48,9 @@ _ZAI_PRIMARY_PROVIDER_PRIORITY = [
     "mistral",
     "xai",
     "together",
+    # Paid coding-model gateways — below the free tiers by default.
+    "opencode-zen",
+    "opencode-go",
 ]
 
 # Auxiliary task kinds — small/cheap helper models that run *outside* the
@@ -116,52 +121,41 @@ _DEFAULT_MODEL_ROUTING = {
         "mistral": "mistral-small-latest",
         "xai": "grok-3-mini",
         "together": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "opencode-zen": "grok-code",
+        "opencode-go": "glm-5.2",
     },
+    # Every default chain is SELF-ONLY (fail-closed): a slot NEVER silently falls
+    # back to a provider the operator didn't choose for it. A throttled/failed
+    # primary surfaces instead of quietly switching. Operators opt into
+    # cross-provider fallback per-slot in the Routing & Fallbacks tab.
     "fallback_chains": {
         "openai": [
             {"provider": "openai", "model_id": "gpt-5.2"},
-            {"provider": "minimax", "model_id": "MiniMax-M2.5"},
         ],
         "minimax": [
             {"provider": "minimax", "model_id": "MiniMax-M2.5"},
-            {"provider": "openai", "model_id": "gpt-5.2"},
         ],
         "lmstudio": [
             {"provider": "lmstudio", "model_id": "local-model"},
-            {"provider": "openai", "model_id": "gpt-5.2"},
-            {"provider": "minimax", "model_id": "MiniMax-M2.5"},
         ],
         "zai": [
             {"provider": "zai", "model_id": "glm-5.1"},
-            {"provider": "openai", "model_id": "gpt-5.2"},
-            {"provider": "minimax", "model_id": "MiniMax-M2.5"},
         ],
         "openrouter": [
             {"provider": "openrouter", "model_id": "openai/gpt-4o-mini"},
-            {"provider": "openai", "model_id": "gpt-5.2"},
         ],
         "anthropic": [
             {"provider": "anthropic", "model_id": "claude-sonnet-4-6"},
-            {"provider": "openai", "model_id": "gpt-5.2"},
         ],
         "deepseek": [
             {"provider": "deepseek", "model_id": "deepseek-chat"},
-            {"provider": "openai", "model_id": "gpt-5.2"},
         ],
         "groq": [
             {"provider": "groq", "model_id": "llama-3.3-70b-versatile"},
-            # Groq's free tier has a tight per-minute token budget; fall back to
-            # Gemini (free, large context) before any paid provider so a request
-            # too large for Groq still completes for free.
-            {"provider": "gemini", "model_id": "gemini-2.5-flash-lite"},
-            {"provider": "openai", "model_id": "gpt-5.2"},
         ],
         "gemini": [
             {"provider": "gemini", "model_id": "gemini-2.5-flash-lite"},
-            {"provider": "openai", "model_id": "gpt-5.2"},
         ],
-        # New providers default to a self-only (fail-closed) chain; operators add
-        # explicit cross-provider fallbacks in the Routing & Fallbacks tab.
         "cerebras": [
             {"provider": "cerebras", "model_id": "llama-3.3-70b"},
         ],
@@ -173,6 +167,12 @@ _DEFAULT_MODEL_ROUTING = {
         ],
         "together": [
             {"provider": "together", "model_id": "meta-llama/Llama-3.3-70B-Instruct-Turbo"},
+        ],
+        "opencode-zen": [
+            {"provider": "opencode-zen", "model_id": "grok-code"},
+        ],
+        "opencode-go": [
+            {"provider": "opencode-go", "model_id": "glm-5.2"},
         ],
     },
     "auxiliary": copy.deepcopy(_DEFAULT_AUXILIARY_ROUTING),

@@ -16,6 +16,7 @@ import httpx
 from forven.model_routing import get_model_routing_snapshot
 
 from forven.auth.store import get_profile, get_token
+from forven.codex_responses import is_openai_oauth_token
 from forven.model_routing import (
     get_default_model_for_provider,
     get_fallback_chain,
@@ -168,6 +169,8 @@ ENDPOINTS = {
     "mistral": "https://api.mistral.ai/v1/chat/completions",
     "xai": "https://api.x.ai/v1/chat/completions",
     "together": "https://api.together.xyz/v1/chat/completions",
+    "opencode-zen": "https://opencode.ai/zen/v1/chat/completions",
+    "opencode-go": "https://opencode.ai/zen/go/v1/chat/completions",
 }
 
 _PROVIDER_ALIAS = {
@@ -183,9 +186,23 @@ _PROVIDER_ALIAS = {
 
 _KNOWN_PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "openai", "minimax", "lmstudio", "zai", "openrouter", "groq", "gemini",
-    "cerebras", "mistral", "xai", "together",
+    "cerebras", "mistral", "xai", "together", "opencode-zen", "opencode-go",
     "codex", "openai-codex", "local", "lm-studio", "z.ai", "z-ai",
     "open-router", "open_router",
+})
+
+# Providers whose EXPLICIT selection is authoritative: pass the model string
+# through unchanged instead of re-routing it by model NAME. Gateways
+# (opencode-zen/opencode-go/openrouter/together) and the single-vendor
+# OpenAI-compatible providers serve models whose names resemble another
+# vendor's — e.g. OpenCode GO serves glm-*/minimax-*/deepseek-*/kimi-* — so the
+# legacy "looks_like_zai / looks_like_minimax" heuristics below must NOT hijack
+# them. (That rewrote opencode-go:glm-5.2 to zai:glm-5.2, breaking both the
+# enable-list key and the runtime route.) The legacy ambiguous providers
+# (openai/minimax/zai/lmstudio) keep their model-name cross-checks.
+_PROVIDER_PASSTHROUGH: frozenset[str] = frozenset({
+    "openrouter", "anthropic", "deepseek", "groq", "gemini",
+    "cerebras", "mistral", "xai", "together", "opencode-zen", "opencode-go",
 })
 
 
@@ -466,6 +483,12 @@ def normalize_provider_and_model(provider: str | None, model: str | None = None)
             primary_provider, primary_model = get_primary_provider_model()
             return _normalize_provider(primary_provider), str(primary_model or "").strip()
         return normalized_provider, get_default_model_for_provider(normalized_provider)
+
+    # An explicitly-specified gateway / single-vendor provider is authoritative:
+    # pass the model through as-is so model-NAME heuristics can't re-route it to
+    # another provider (e.g. opencode-go:glm-5.2 must stay on opencode-go, not zai).
+    if normalized_provider in _PROVIDER_PASSTHROUGH:
+        return normalized_provider, normalized_model
 
     # If provider is missing/unknown but model resembles a known provider, route there.
     if _looks_like_minimax_model(normalized_model):
@@ -962,7 +985,7 @@ async def _call_single(
             endpoint=ENDPOINTS["openrouter"],
             provider_label="openrouter",
         )
-    elif provider in ("groq", "gemini", "cerebras", "mistral", "xai", "together"):
+    elif provider in ("groq", "gemini", "cerebras", "mistral", "xai", "together", "opencode-zen", "opencode-go"):
         # All expose OpenAI-compatible Chat Completions endpoints, so route
         # through the shared OpenAI caller with the provider's endpoint/label.
         return await _call_openai(
@@ -995,6 +1018,24 @@ async def _call_openai(
     Also serves OpenRouter (same protocol) — pass ``endpoint``/``provider_label``
     to redirect to another OpenAI-compatible gateway.
     """
+    # First-party OpenAI only: a ChatGPT OAuth token is rejected by the platform
+    # Chat Completions endpoint and must use the Codex Responses backend instead.
+    # (OpenAI-compatible gateways reuse this caller with a different
+    # provider_label and never carry an OpenAI OAuth token, so they're skipped.)
+    if provider_label == "openai" and is_openai_oauth_token(token):
+        from forven.codex_responses import call_codex
+
+        result = await call_codex(
+            token,
+            model,
+            instructions=system,
+            messages=messages,
+            tools=None,
+            response_schema=response_schema,
+            response_schema_name=response_schema_name,
+        )
+        return str(result.get("text") or "")
+
     url = endpoint or ENDPOINTS["openai"]
     headers = {
         "Authorization": f"Bearer {token}",

@@ -716,9 +716,9 @@ def test_low_sample_monte_carlo_and_failed_optimization_do_not_promote(forven_db
     assert robustness_router._collect_succeeded_validation_types(strategy_id) == set()
     assert robustness_router._has_paper_readiness_artifacts(strategy_id) is False
     assert allowed is False
-    # A monte_carlo-only required_tests config is intentionally restored to the
-    # launch default (walk_forward/param_jitter/cost_stress) by policy.py, since
-    # MC-only gating starves graduation. With none of those validations present,
-    # the strategy is correctly rejected on composite robustness (0.0/100) rather
-    # than with a Monte-Carlo-specific message — the non-promotion is the contract.
-    assert "robustness too low" in reason.lower()
+    # The robustness floor is now an EDITABLE safety floor (this config sets it to 0),
+    # so the non-promotion comes from the MC baseline-trade safety floor (1 < min)
+    # rather than the robustness floor — either way the strategy does NOT promote,
+    # which is the contract. (required_tests is also self-healed to the launch default
+    # [walk_forward, param_jitter] since MC-only gating starves graduation.)
+    assert ("robustness too low" in reason.lower()) or ("monte carlo baseline" in reason.lower())
