@@ -132,6 +132,32 @@ from axiom.strategies.base import BaseStrategy, Signal
 
 Do NOT import from other strategy files. Keep each strategy self-contained.
 
+### Pandas 3.x Compatibility (REQUIRED — container runs pandas 3.0)
+
+The production container uses **pandas 3.0**. The following pandas 2.x patterns
+are **removed** and will raise a `TypeError` or `OptionError` at runtime:
+
+```python
+# ✗ REMOVED in pandas 3.0 — raises TypeError
+series.fillna(method='ffill')   # → use series.ffill()
+series.fillna(method='bfill')   # → use series.bfill()
+series.fillna(method='pad')     # → use series.ffill()
+
+# ✗ REMOVED in pandas 3.0 — raises OptionError
+pd.options.mode.chained_assignment = None   # delete this line entirely
+
+# ✗ ChainedAssignment raises ChainedAssignmentError in pandas 3.0 (CoW enabled)
+df[mask]['col'] = value          # → use df.loc[mask, 'col'] = value
+
+# ✓ Correct pandas 3.0 patterns
+series.ffill()                   # forward-fill NaNs
+series.bfill()                   # back-fill NaNs
+df.loc[mask, 'col'] = value      # safe in-place assignment
+```
+
+The normalizer auto-fixes `fillna(method=...)` calls before validation, but
+chained assignment must be written correctly from the start.
+
 ### BANNED IMPORTS — do not use under any circumstances
 
 The following libraries are **forbidden** in strategy files. Ruff enforces this

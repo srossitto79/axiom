@@ -1,6 +1,7 @@
 ﻿"""Self-healing code validator: lint, fix, and test agent-generated code."""
 
 import logging
+import re
 
 from axiom.sandbox import lint_code, run_code
 from axiom.sandbox.ast_guard import scan_source
@@ -8,6 +9,28 @@ from axiom.sandbox.ast_guard import scan_source
 log = logging.getLogger("axiom.selfheal")
 
 MAX_FIX_ROUNDS = 3
+
+# Regex patterns for pandas 2.x APIs removed in pandas 3.0.
+# Applied in normalize_generated_strategy_code so the harness subprocess always
+# runs pandas-3-safe code regardless of which model generated the strategy.
+_PANDAS3_FIXUPS: list[tuple[re.Pattern[str], str]] = [
+    # .fillna(method='ffill') / .fillna(method='pad') → .ffill()
+    (re.compile(r"\.fillna\(\s*method\s*=\s*['\"](?:ffill|pad)['\"]\s*\)"), ".ffill()"),
+    # .fillna(method='bfill') / .fillna(method='backfill') → .bfill()
+    (re.compile(r"\.fillna\(\s*method\s*=\s*['\"](?:bfill|backfill)['\"]\s*\)"), ".bfill()"),
+    # pd.options.mode.chained_assignment = ... — option removed in pandas 3.0 (CoW)
+    (re.compile(r"^[^\S\n]*pd\.options\.mode\.chained_assignment\s*=.*$", re.MULTILINE), ""),
+]
+
+
+def _fix_pandas3_compat(code: str) -> str:
+    """Replace pandas 2.x patterns that raise in pandas 3.0 with their modern equivalents."""
+    for pattern, replacement in _PANDAS3_FIXUPS:
+        new_code = pattern.sub(replacement, code)
+        if new_code != code:
+            log.debug("pandas-3 compat fixup applied: %s", pattern.pattern[:60])
+            code = new_code
+    return code
 
 
 def normalize_generated_strategy_code(code: str) -> str:
@@ -28,10 +51,11 @@ def normalize_generated_strategy_code(code: str) -> str:
         body_lines.pop(0)
 
     if not future_imports:
-        return normalized
+        return _fix_pandas3_compat(normalized)
 
     body = "\n".join(body_lines).rstrip()
-    return "\n".join([*future_imports, "", body]).rstrip() + "\n"
+    result = "\n".join([*future_imports, "", body]).rstrip() + "\n"
+    return _fix_pandas3_compat(result)
 
 
 def validate_strategy_code(code: str) -> dict:
