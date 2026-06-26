@@ -105,6 +105,41 @@ def _format_risk_policy() -> str:
     ])
 
 
+def _format_autonomy_mode() -> str:
+    """Render current pipeline autonomy mode and its operative constraints.
+
+    Injected into both brain and agent contexts so neither wastes tokens
+    planning work that will be rejected at tool gates.
+    """
+    try:
+        from axiom.system_mode_policy import autonomous_hypothesis_generation_allowed
+        from axiom.system_pause import get_system_pause_state
+        state = get_system_pause_state()
+        mode = str(state.get("system_mode") or "manual")
+        gen_allowed = autonomous_hypothesis_generation_allowed(mode)
+    except Exception:
+        return ""
+    lines = [f"# PIPELINE AUTONOMY MODE: {mode.upper()}"]
+    if mode == "manual":
+        lines += [
+            "ALL autonomous work is frozen. Only operator-initiated tasks run.",
+            "- Do NOT assign tasks to agents. Do NOT create hypotheses or strategies.",
+            "- Read, review, and report only.",
+        ]
+    elif mode == "semi_auto":
+        lines += [
+            "New hypothesis/crucible creation is BLOCKED.",
+            "- `create_hypothesis` WILL REJECT — do NOT assign tasks that require minting a new hypothesis or crucible.",
+            "- Existing hypothesis development is ALLOWED: AXIOM_create_strategy, update_hypothesis_fields, backtests.",
+            "- Assign work only against EXISTING hypotheses. Do not propose or plan new crucibles.",
+        ]
+    else:
+        lines += [
+            "Full autonomy active. All pipeline tools are available.",
+        ]
+    return "\n".join(lines)
+
+
 def _format_untrusted_content_policy() -> str:
     return "\n".join([
         "# EXTERNAL / UNTRUSTED CONTENT",
@@ -269,6 +304,10 @@ def build_brain_context(session_type: str = "main") -> str:
         parts.append(user_block)
 
     parts.append(_format_risk_policy())
+
+    autonomy_block = _format_autonomy_mode()
+    if autonomy_block:
+        parts.append(autonomy_block)
 
     identity = read_workspace("IDENTITY.md", optional=True)
     if identity:
@@ -516,6 +555,10 @@ def build_agent_context(
     parts.append(_format_untrusted_content_policy())
     parts.append(_format_worker_operating_rules())
     parts.append(_format_risk_policy())
+
+    autonomy_block = _format_autonomy_mode()
+    if autonomy_block:
+        parts.append(autonomy_block)
 
     # Per-agent SOUL — who this sub-agent is (seeded from the shared template,
     # personalized per agent). Falls back to the global SOUL.md for agents that

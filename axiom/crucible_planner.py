@@ -605,13 +605,19 @@ def _research_pool_needs_replenishment(
 
 
 def plan_next_actions(*, limit: int = 3) -> list[CrucibleAction]:
+    from axiom.system_mode_policy import autonomous_hypothesis_generation_allowed
+
     max_actions = max(0, int(limit))
     if max_actions == 0:
         return []
 
+    generation_allowed = autonomous_hypothesis_generation_allowed()
     task_index = CrucibleTaskIndex.build()
     crucibles = _active_crucible_rows()
     if not crucibles:
+        if not generation_allowed:
+            log.info("plan_next_actions: skipping propose_crucible — hypothesis generation blocked in current mode")
+            return []
         action = _propose_crucible_action()
         return [] if task_index.open_action_exists(action.action_kind, action.crucible_id) else [action]
 
@@ -626,9 +632,12 @@ def plan_next_actions(*, limit: int = 3) -> list[CrucibleAction]:
         if len(actions) >= max_actions:
             break
     if not actions and _research_pool_needs_replenishment(crucibles, task_index=task_index):
-        action = _propose_crucible_action()
-        if not task_index.open_action_exists(action.action_kind, action.crucible_id):
-            actions.append(action)
+        if not generation_allowed:
+            log.info("plan_next_actions: pool needs replenishment but propose_crucible blocked — hypothesis generation disabled")
+        else:
+            action = _propose_crucible_action()
+            if not task_index.open_action_exists(action.action_kind, action.crucible_id):
+                actions.append(action)
     return actions
 
 
@@ -639,7 +648,10 @@ def run_crucible_planner_cycle(*, limit: int = 3) -> dict[str, Any]:
         _current_in_flight_task_count,
     )
     from axiom.research_contract import get_hypothesis_discipline_settings
+    from axiom.system_mode_policy import autonomous_hypothesis_generation_allowed
+    from axiom.system_pause import get_system_mode
 
+    generation_allowed = autonomous_hypothesis_generation_allowed()
     actions = plan_next_actions(limit=limit)
 
     # Share the strategy-developer in-flight budget with the hypothesis-promotion
@@ -690,6 +702,8 @@ def run_crucible_planner_cycle(*, limit: int = 3) -> dict[str, Any]:
         "assigned": len(assigned_task_ids),
         "assigned_task_ids": assigned_task_ids,
         "actions": [action.action_kind for action in actions],
+        "system_mode": get_system_mode(),
+        "generation_allowed": generation_allowed,
     }
     if deferred_for_cap:
         result["deferred_for_in_flight_cap"] = deferred_for_cap

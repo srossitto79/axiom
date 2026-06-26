@@ -120,7 +120,7 @@ def _current_agent_task() -> dict[str, Any]:
         if numeric_id is not None:
             row = conn.execute(
                 """
-                SELECT id, display_id, type, title, status, input_data
+                SELECT id, display_id, type, title, status, source, input_data
                 FROM agent_tasks
                 WHERE display_id = ? OR id = ?
                 ORDER BY id DESC
@@ -131,7 +131,7 @@ def _current_agent_task() -> dict[str, Any]:
         else:
             row = conn.execute(
                 """
-                SELECT id, display_id, type, title, status, input_data
+                SELECT id, display_id, type, title, status, source, input_data
                 FROM agent_tasks
                 WHERE display_id = ?
                 ORDER BY id DESC
@@ -443,6 +443,7 @@ def _normalize_youtube_inspect_result(raw_result: Any) -> dict[str, Any]:
     category="research",
 )
 def _tool_create_hypothesis(params: dict) -> str:
+    from axiom.agents.context import _current_tools_context_var
     from axiom.system_mode_policy import autonomous_hypothesis_generation_allowed
     from axiom.system_pause import get_system_mode
 
@@ -452,16 +453,25 @@ def _tool_create_hypothesis(params: dict) -> str:
 
     system_mode = get_system_mode()
     if not autonomous_hypothesis_generation_allowed(system_mode):
-        return json.dumps({
-            "ok": False,
-            "error_code": "generation_paused",
-            "error": (
-                f"Autonomous hypothesis generation is disabled in "
-                f"system_mode={system_mode!r}. Only operator-initiated "
-                "hypotheses are accepted in this mode."
-            ),
-            "system_mode": system_mode,
-        })
+        # Operator-initiated work bypasses the mode gate — same policy as
+        # assistant_create_strategy. Two signals identify an operator session:
+        #  1. tools_context="interactive" — direct chat (CHAT:/CONFIRM: display ids)
+        #  2. task source="user" — operator clicked a UI action (e.g. Discover button)
+        # Autonomous scheduler/keepalive cycles have neither signal and are blocked.
+        _tools_context = str(_current_tools_context_var.get() or "").strip().lower()
+        _task_source = str((_current_agent_task()).get("source") or "").strip().lower()
+        _is_operator_initiated = _tools_context == "interactive" or _task_source == "user"
+        if not _is_operator_initiated:
+            return json.dumps({
+                "ok": False,
+                "error_code": "generation_paused",
+                "error": (
+                    f"Autonomous hypothesis generation is disabled in "
+                    f"system_mode={system_mode!r}. Only operator-initiated "
+                    "hypotheses are accepted in this mode."
+                ),
+                "system_mode": system_mode,
+            })
 
     # Crypto-only scope: Axiom trades crypto (Hyperliquid) for now; stock/forex
     # support may return later. Without this gate the autonomous loops mint

@@ -3467,7 +3467,19 @@ def assign_risk_audit():
     # as portfolio exposure.
     open_trades = get_open_trades(exclude_bots=True)
     status = kv_get("status") or {}
-    
+
+    kill_switch_active = bool(status.get("killSwitch"))
+    if not open_trades and not kill_switch_active:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM strategies "
+                "WHERE LOWER(TRIM(stage)) IN ('paper', 'deployed', 'live_graduated')"
+            ).fetchone()
+        active_strategies = int(row["c"]) if row else 0
+        if not active_strategies:
+            log.info("risk_audit: no open positions, no active strategies, kill switch inactive — skipping")
+            return
+
     settings = kv_get("axiom:settings", {})
     pipeline = kv_get("axiom:pipeline_thresholds", {})
     

@@ -218,6 +218,7 @@ def _tool_assistant_create_strategy(
     timeframe: str = "1h",
     notes: str = "",
 ) -> str:
+    from axiom.agents.context import _current_tools_context_var
     from axiom.agents.tools_brain import _current_brain_payload
     from axiom.brain import create_strategy, resolve_brain_provider_model
     from axiom.hypotheses import create_hypothesis
@@ -228,8 +229,18 @@ def _tool_assistant_create_strategy(
     # Operator chat sessions are always allowed to create strategies.
     # Autonomous brain cycles (keepalive, agent_callback, etc.) must respect the mode gate
     # — without this check the brain bypasses the semi-auto hypothesis-creation block.
+    #
+    # Two pathways identify an operator session:
+    #  1. tools_context="interactive" — set by assistant_session.py (CHAT:/CONFIRM: display ids)
+    #     and runtime_worker.py ui_chat tasks. This is the primary signal.
+    #  2. brain task payload source="ui_chat" — older bot.py B-prefixed brain tasks that
+    #     _current_brain_payload() can look up (display_id starts with "B").
+    # assistant_session.py uses CHAT:{thread_id} as the display_id, which does NOT start
+    # with "B", so _current_brain_payload() returns {} — missing the ui_chat check entirely.
+    _tools_context = str(_current_tools_context_var.get() or "").strip().lower()
     _brain_source = str((_current_brain_payload()).get("source") or "").strip().lower()
-    if _brain_source != "ui_chat":
+    _is_operator_session = _tools_context == "interactive" or _brain_source == "ui_chat"
+    if not _is_operator_session:
         _mode = get_system_mode()
         if not autonomous_hypothesis_generation_allowed(_mode):
             return _json.dumps({
