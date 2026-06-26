@@ -400,40 +400,47 @@ def _tool_run_code(code: str) -> str:
 @register_tool(
     name="register_strategy",
     description=(
-        "Validate and register a new custom strategy type. Writes the Python module to the custom/ directory, "
-        "validates it via lint + sandbox test, and reloads the registry so it's immediately available for "
-        "backtesting via run_backtest. The code must extend BaseStrategy from axiom.strategies.base and "
-        "export STRATEGY_CLASS and TYPE_NAME. Implement name/asset/strategy_type/default_params as properties "
-        "or class attributes; generate_signal(df) must return a scalar Signal for the latest bar. Use "
-        "generate_signals(df) for vectorized pandas Series. Agent-generated strategies must include "
-        "hypothesis_id so the resulting strategy container is registered directly against its parent hypothesis."
+        "Validate and register a custom strategy type. Two modes:\n"
+        "  • NEW: provide 'code' + 'type_name' — writes the module to custom/ then registers it.\n"
+        "  • EXISTING: provide 'module_name' — registers a file already in custom/ WITHOUT overwriting it. "
+        "Use this when the operator has already written and certified the file.\n"
+        "Code must extend BaseStrategy, export STRATEGY_CLASS and TYPE_NAME, and implement "
+        "generate_signal(df) returning a scalar Signal. Agent-generated strategies must include "
+        "hypothesis_id so the container is registered against its parent hypothesis."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "code": {"type": "string", "description": "Full Python source code of the strategy module. Must import and extend BaseStrategy, implement generate_signal(df) returning a scalar Signal for the latest bar, and export STRATEGY_CLASS and TYPE_NAME."},
-            "type_name": {"type": "string", "description": "Unique type name for the strategy (e.g., 'fisher_momentum', 'qqe_trend'). Alphanumeric and underscores only."},
+            "code": {"type": "string", "description": "Full Python source code of the strategy module (new strategies only). Must import and extend BaseStrategy, implement generate_signal(df) returning a scalar Signal, and export STRATEGY_CLASS and TYPE_NAME."},
+            "type_name": {"type": "string", "description": "Unique type name (e.g., 'fisher_momentum'). Required when providing 'code'. Alphanumeric and underscores only."},
+            "module_name": {"type": "string", "description": "Name of an existing .py file in custom/ (without the .py extension). Use when the operator's file is already in place — the file is NOT overwritten."},
             "hypothesis_id": {"type": "string", "description": "Parent hypothesis ID for the strategy container that will be registered from this module."},
             "crucible_id": {"type": "string", "description": "Planner-approved crucible/hypothesis ID for this candidate."},
         },
-        "required": ["code", "type_name", "hypothesis_id"],
+        "required": ["hypothesis_id"],
     },
     permissions={"role:strategy-developer", None},
 )
 def _tool_register_strategy(params: dict) -> str:
-    """Validate, save to custom/ directory, and register a new strategy type."""
+    """Validate, save to custom/ directory (if new), and register a strategy type."""
     from axiom.crucible_tasks import validate_candidate_strategy_creation
 
-    code = params.get("code", "")
-    type_name = params.get("type_name", "")
+    code = str(params.get("code") or "").strip()
+    type_name = str(params.get("type_name") or "").strip()
+    module_name = str(params.get("module_name") or "").strip()
     crucible_id = str(params.get("crucible_id") or params.get("hypothesis_id") or "").strip()
     hypothesis_id = str(params.get("hypothesis_id") or crucible_id).strip()
 
-    if not code or not type_name or not hypothesis_id:
-        return "Error: 'code', 'type_name', and 'hypothesis_id' are required"
+    if not hypothesis_id:
+        return "Error: 'hypothesis_id' is required"
 
-    if not type_name.replace("_", "").isalnum():
-        return "Error: type_name must be alphanumeric with underscores only"
+    using_existing_file = bool(module_name) and not code
+
+    if not using_existing_file:
+        if not code or not type_name:
+            return "Error: provide either 'module_name' (existing file) or both 'code' and 'type_name' (new file)"
+        if not type_name.replace("_", "").isalnum():
+            return "Error: type_name must be alphanumeric with underscores only"
 
     validation = validate_candidate_strategy_creation(
         crucible_id,
@@ -447,6 +454,57 @@ def _tool_register_strategy(params: dict) -> str:
     hypothesis_id = str(validation.hypothesis_id or hypothesis_id).strip()
     provenance = _current_candidate_provenance(crucible_id)
 
+    import os
+    custom_dir = os.path.join(os.path.dirname(__file__), "..", "strategies", "custom")
+
+    if using_existing_file:
+        # Register an existing operator-written file without overwriting it.
+        filepath = os.path.join(custom_dir, f"{module_name}.py")
+        if not os.path.exists(filepath):
+            return f"Error: module '{module_name}' not found at {filepath}"
+        try:
+            from axiom.strategies.registry import reset, discover, _TYPE_MAP
+            from axiom.strategies.intake import register_custom_strategy_file
+            reset()
+
+            registration = register_custom_strategy_file(
+                file_path=filepath,
+                source="agent_register",
+                hypothesis_id=hypothesis_id,
+                origin_task_id=provenance.get("origin_task_id"),
+            )
+            registered_type_name = str(registration.get("type_name") or module_name).strip()
+            discover()
+            if registered_type_name not in _TYPE_MAP:
+                return (
+                    f"Warning: file registered but type '{registered_type_name}' not found in "
+                    f"registry. Ensure the module exports TYPE_NAME and STRATEGY_CLASS."
+                )
+
+            registered_strategy_id = str(registration.get("strategy_id") or "").strip()
+            current_strategy_id = str(_current_strategy_id_var.get() or "").strip()
+            target_strategy_id = registered_strategy_id or current_strategy_id
+            if target_strategy_id:
+                with get_db() as conn:
+                    conn.execute(
+                        "UPDATE strategies SET runtime_type = ?, updated_at = ? WHERE id = ?",
+                        (registered_type_name, datetime.now(timezone.utc).isoformat(), target_strategy_id),
+                    )
+                _persist_strategy_provenance(target_strategy_id, provenance)
+            if registered_strategy_id:
+                return (
+                    f"Existing strategy file '{module_name}.py' registered successfully as "
+                    f"{registered_strategy_id} (type='{registered_type_name}') for hypothesis {hypothesis_id}."
+                )
+            return (
+                f"Existing strategy file '{module_name}.py' registered (type='{registered_type_name}') "
+                f"for hypothesis {hypothesis_id}, but no strategy container id was returned."
+            )
+        except Exception as e:
+            return f"Registration of existing file failed: {e}"
+
+    # --- New-file path: write code then register ---
+
     # Validate strategy code via self-healer (lint + sandbox test harness)
     try:
         from axiom.selfheal import validate_strategy_code
@@ -459,8 +517,6 @@ def _tool_register_strategy(params: dict) -> str:
         return f"Validation error: {e}"
 
     # Save to custom/ directory
-    import os
-    custom_dir = os.path.join(os.path.dirname(__file__), "..", "strategies", "custom")
     os.makedirs(custom_dir, exist_ok=True)
 
     # Ensure __init__.py exists

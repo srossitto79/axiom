@@ -990,6 +990,25 @@ def _queue_autonomous_research_follow_through_if_needed(
         if existing:
             continue
 
+        # Check for operator-written strategy files already certified for this hypothesis.
+        _existing_file_note = ""
+        _existing_file_modules: list[str] = []
+        try:
+            from axiom.api_domains.hypotheses import _find_certified_files_for_hypothesis
+            _certified_files = _find_certified_files_for_hypothesis(hypothesis_id)
+            if _certified_files:
+                _existing_file_modules = [f["module_name"] for f in _certified_files]
+                _file_list = ", ".join(f"'{m}'" for m in _existing_file_modules)
+                _existing_file_note = (
+                    f"\n\nIMPORTANT: The operator has already written certified strategy file(s) "
+                    f"for this hypothesis: {_file_list}. "
+                    f"Register the existing file(s) using "
+                    f"register_strategy(module_name='<name>', hypothesis_id='{hypothesis_id}') "
+                    f"instead of writing new code. Do NOT overwrite the operator's file."
+                )
+        except Exception:
+            pass
+
         description = (
             f"FOLLOW-THROUGH STRATEGY CYCLE - hypothesis {display_id}.\n\n"
             f"Title: {str(hypothesis.get('title') or '').strip()}\n\n"
@@ -1000,22 +1019,26 @@ def _queue_autonomous_research_follow_through_if_needed(
             "4. Do not claim funding data, backtest support, or registration is unavailable without verifying locally with tools first.\n"
             "5. Use the exact provided hypothesis_id/crucible_id; do not call create_hypothesis.\n"
             "6. End with the created strategy ids, or the exact verified blocker if creation failed."
+            + _existing_file_note
         )
+        _follow_through_input: dict = {
+            "_channel": str(payload.get("_channel") or "chat"),
+            "origin_mode": "autonomous_follow_through",
+            "action_kind": "develop_candidate",
+            "crucible_id": hypothesis_id,
+            "source_task_display_id": str(task.get("display_id") or "").strip(),
+            "hypothesis_id": hypothesis_id,
+            "hypothesis_display_id": display_id,
+            "hypothesis_title": str(hypothesis.get("title") or "").strip(),
+        }
+        if _existing_file_modules:
+            _follow_through_input["existing_strategy_modules"] = _existing_file_modules
         assigned = _assign_follow_through_task(
             agent_id="strategy-developer",
             task_type="develop_candidate",
             title=title,
             description=description,
-            input_data={
-                "_channel": str(payload.get("_channel") or "chat"),
-                "origin_mode": "autonomous_follow_through",
-                "action_kind": "develop_candidate",
-                "crucible_id": hypothesis_id,
-                "source_task_display_id": str(task.get("display_id") or "").strip(),
-                "hypothesis_id": hypothesis_id,
-                "hypothesis_display_id": display_id,
-                "hypothesis_title": str(hypothesis.get("title") or "").strip(),
-            },
+            input_data=_follow_through_input,
         )
         try:
             return int(assigned)

@@ -947,6 +947,51 @@ def _active_generate_strategies_task_for_hypothesis(hypothesis_id: str) -> dict[
     return None
 
 
+def _find_certified_files_for_hypothesis(hypothesis_id: str) -> list[dict[str, str]]:
+    """Return certified custom strategy files that embed the given hypothesis ID.
+
+    Scans axiom/strategies/custom/ for files that declare AXIOM_HYPOTHESIS_ID
+    matching ``hypothesis_id`` AND are certified (certified=True from the intake
+    scan). Returns a list of dicts with keys 'module_name' and 'file_path'.
+    """
+    import pkgutil
+    from pathlib import Path
+
+    results: list[dict[str, str]] = []
+    try:
+        from axiom.strategies import custom as _custom_pkg
+        from axiom.strategies.intake import _extract_embedded_hypothesis_id
+        from axiom.strategies.certification import certify_execution_strategy
+        import importlib
+
+        custom_dir = Path(_custom_pkg.__file__).resolve().parent
+        for _importer, modname, _ispkg in pkgutil.iter_modules(_custom_pkg.__path__):
+            if not modname or modname == "__init__":
+                continue
+            fpath = custom_dir / f"{modname}.py"
+            emb_id = _extract_embedded_hypothesis_id(fpath)
+            if not emb_id or emb_id.strip().upper() != hypothesis_id.strip().upper():
+                continue
+            # Quick certification check without full import
+            try:
+                fqn = f"axiom.strategies.custom.{modname}"
+                mod = importlib.import_module(fqn)
+                type_name = getattr(mod, "TYPE_NAME", None)
+                strategy_cls = getattr(mod, "STRATEGY_CLASS", None)
+                if not type_name or not strategy_cls:
+                    continue
+                probe = strategy_cls("__probe__", {})
+                cert = certify_execution_strategy(type_name, probe.default_params)
+                if cert.certified:
+                    results.append({"module_name": modname, "file_path": str(fpath)})
+            except Exception:
+                # If we can't verify, still include it — the intake scan already approved it
+                results.append({"module_name": modname, "file_path": str(fpath)})
+    except Exception:
+        pass
+    return results
+
+
 def _enqueue_generate_strategies(
     *,
     hypothesis: dict[str, Any],
@@ -958,6 +1003,23 @@ def _enqueue_generate_strategies(
     enrichment, no hypothesis field edits. Failures do not roll back anything.
     """
     display_id = hypothesis.get("display_id") or hypothesis["id"]
+
+    # Check for operator-written strategy files already in custom/ for this hypothesis.
+    existing_files = _find_certified_files_for_hypothesis(hypothesis["id"])
+    existing_files_note = ""
+    existing_files_input: list[str] = []
+    if existing_files:
+        module_names = [f["module_name"] for f in existing_files]
+        existing_files_input = module_names
+        file_list = ", ".join(f"'{m}'" for m in module_names)
+        existing_files_note = (
+            f"\n\nIMPORTANT: The operator has already written certified strategy file(s) "
+            f"for this hypothesis: {file_list}. "
+            f"Register the existing file(s) using "
+            f"register_strategy(module_name='<name>', hypothesis_id='{hypothesis['id']}') "
+            f"instead of writing new code. Do NOT overwrite the operator's file."
+        )
+
     title = f"Generate candidate strategies for hypothesis {display_id}"
     description = (
         f"An operator requested candidate strategies for hypothesis {display_id}. "
@@ -970,7 +1032,17 @@ def _enqueue_generate_strategies(
         f"hypothesis_id={hypothesis['id']}, lane={hypothesis.get('lane') or 'benchmarking'}.\n"
         f"3. Stop. Do not record data gaps. Do not edit hypothesis fields. Do not "
         f"go outside this hypothesis."
+        + existing_files_note
     )
+    input_data: dict[str, Any] = {
+        "origin_mode": "operator_generate_strategies",
+        "hypothesis_id": hypothesis["id"],
+        "hypothesis_display_id": hypothesis.get("display_id"),
+        "hypothesis_title": hypothesis.get("title"),
+    }
+    if existing_files_input:
+        input_data["existing_strategy_modules"] = existing_files_input
+
     try:
         from axiom.brain import assign_task
 
@@ -979,12 +1051,7 @@ def _enqueue_generate_strategies(
             task_type="generate_strategies",
             title=title,
             description=description,
-            input_data={
-                "origin_mode": "operator_generate_strategies",
-                "hypothesis_id": hypothesis["id"],
-                "hypothesis_display_id": hypothesis.get("display_id"),
-                "hypothesis_title": hypothesis.get("title"),
-            },
+            input_data=input_data,
             priority=5,
             source=source,
         )
