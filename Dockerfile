@@ -20,7 +20,7 @@ COPY axiom/ ./axiom/
 COPY templates/ ./templates/
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir ".[discord]" \
+    && pip install --no-cache-dir -e ".[discord]" \
     && pip install --no-cache-dir uvicorn[standard]
 
 # ── Data directory ──────────────────────────────────────────────────

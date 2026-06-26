@@ -25,6 +25,32 @@ log = logging.getLogger(__name__)
 _BASE_URL_DEFAULT = "http://192.168.0.210:8001"
 _TODAY_TTL_SECONDS = 300  # 5 min TTL for today's cache
 _MAX_STALENESS_MULT = 5   # live path: skip metric if age > 5× collection_interval
+_DEFAULT_COLLECTION_INTERVAL_S = 3600  # fallback when interval can't be parsed
+
+
+def _interval_to_seconds(value: object) -> int:
+    """Parse a collection-interval value into seconds.
+
+    The metrics API reports collection_interval as a string like "5m", "1h",
+    "1d" (not seconds). Accepts ints/floats (already seconds) for resilience.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value) if value > 0 else _DEFAULT_COLLECTION_INTERVAL_S
+    text = str(value or "").strip().lower()
+    if not text:
+        return _DEFAULT_COLLECTION_INTERVAL_S
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    unit = text[-1]
+    if unit in units:
+        try:
+            qty = float(text[:-1] or "1")
+        except ValueError:
+            return _DEFAULT_COLLECTION_INTERVAL_S
+        return max(int(qty * units[unit]), 1)
+    try:
+        return max(int(float(text)), 1)
+    except ValueError:
+        return _DEFAULT_COLLECTION_INTERVAL_S
 
 # Columns the LAN API returns that duplicate what Axiom already has.
 # These are dropped from the matrix response before merging.
@@ -340,30 +366,73 @@ def _enrich_historical(df: pd.DataFrame, asset: str, interval: str) -> pd.DataFr
     return _merge_lan(df, lan_df)
 
 
+def _list_asset_metrics(asset: str) -> list[str]:
+    """Return the metric names the API exposes for an asset (excludes _SKIP_COLS)."""
+    url = f"{_base_url()}/assets/{asset}/metrics"
+    try:
+        r = _get_session().get(url, timeout=10)
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as exc:
+        log.debug("LAN /assets/%s/metrics: %s", asset, exc)
+        return []
+    items = payload.get("metrics", payload) if isinstance(payload, dict) else payload
+    names: list[str] = []
+    for item in items or []:
+        if isinstance(item, str):
+            name = item
+        elif isinstance(item, dict):
+            name = item.get("metric_name") or item.get("metric") or item.get("name") or ""
+        else:
+            continue
+        if name and name not in _SKIP_COLS and name not in names:
+            names.append(name)
+    return names
+
+
 def _enrich_live(df: pd.DataFrame, asset: str) -> pd.DataFrame:
-    """Merge the freshest non-stale metrics from /metrics/latest onto df."""
+    """Merge the freshest non-stale metrics from /metrics/latest onto df.
+
+    The endpoint requires an explicit ``metric`` list (array) and returns
+    ``{"asset": ..., "metrics": {name: {datetime, value, collection_interval}}}``.
+    Metrics older than 5× their collection interval are skipped as dead data.
+    """
+    metrics = _list_asset_metrics(asset)
+    if not metrics:
+        return df
+
     url = f"{_base_url()}/metrics/latest"
     try:
-        r = _get_session().get(url, params={"asset": asset}, timeout=10)
+        r = _get_session().get(url, params={"asset": asset, "metric": metrics}, timeout=10)
         r.raise_for_status()
-        rows = r.json()
+        payload = r.json()
     except Exception as exc:
         log.debug("LAN /metrics/latest %s: %s", asset, exc)
         return df
 
-    if not rows:
+    # New shape: {"metrics": {name: {datetime, value, collection_interval}}}.
+    # Tolerate the legacy list-of-rows shape for resilience.
+    entries = payload.get("metrics", payload) if isinstance(payload, dict) else payload
+    if not entries:
+        return df
+    if isinstance(entries, list):
+        entries = {
+            row.get("metric"): row
+            for row in entries
+            if isinstance(row, dict) and row.get("metric")
+        }
+    if not isinstance(entries, dict):
         return df
 
     now = datetime.now(timezone.utc)
     fresh: dict[str, object] = {}
     ts_map: dict[str, datetime] = {}
 
-    for row in rows:
-        metric = row.get("metric")
-        if not metric or metric in _SKIP_COLS:
+    for metric, info in entries.items():
+        if not metric or metric in _SKIP_COLS or not isinstance(info, dict):
             continue
 
-        raw_dt = row.get("datetime") or row.get("timestamp")
+        raw_dt = info.get("datetime") or info.get("timestamp")
         if not raw_dt:
             continue
         try:
@@ -371,12 +440,12 @@ def _enrich_live(df: pd.DataFrame, asset: str) -> pd.DataFrame:
         except Exception:
             continue
 
-        interval_s = row.get("collection_interval") or row.get("interval_seconds") or 3600
+        interval_s = _interval_to_seconds(info.get("collection_interval") or info.get("interval_seconds"))
         if (now - metric_dt) > timedelta(seconds=interval_s * _MAX_STALENESS_MULT):
             log.debug("LAN skip stale metric %s (last: %s)", metric, metric_dt)
             continue
 
-        value = row.get("value")
+        value = info.get("value")
         if value is not None:
             fresh[metric] = value
             ts_map[metric] = metric_dt
