@@ -164,7 +164,7 @@ def _fetch_matrix_range(
         "interval": interval,
         "start": f"{start_date.strftime('%Y-%m-%d')}T00:00:00",
         "end": f"{end_date.strftime('%Y-%m-%d')}T23:59:59",
-        "shift": 0,
+        "shift": 1,  # API built-in look-ahead prevention
         "clean": "false",
         "include_incomplete": "false",
     }
@@ -236,17 +236,9 @@ def _merge_lan(df: pd.DataFrame, lan_df: pd.DataFrame) -> pd.DataFrame:
     # when the LAN API returns us-precision timestamps and the candle frame is ns.
     lan_df["timestamp"] = pd.to_datetime(lan_df["timestamp"], utc=True).astype("datetime64[ns, UTC]")
     lan_df = lan_df.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
-    # LAN API uses close timestamps; Axiom OHLCV uses open timestamps.
-    # Without correction, a backward merge_asof would match each bar to the
-    # PREVIOUS bar's LAN data (one period old). Shift LAN timestamps back by
-    # one inferred interval to convert close→open before joining.
-    if len(lan_df) >= 3:
-        _diffs = lan_df["timestamp"].diff().dropna()
-        _mode = _diffs.mode()
-        _bucket = _mode.iloc[0] if not _mode.empty else _diffs.median()
-        if pd.notna(_bucket) and pd.Timedelta(0) < _bucket <= pd.Timedelta(days=1):
-            lan_df = lan_df.copy()
-            lan_df["timestamp"] = lan_df["timestamp"] - _bucket
+    # shift=1 in _fetch_matrix_range already converts close→open timestamps
+    # at the API level, making the PREVIOUS period's data available at each
+    # bar open — no manual timestamp shift needed.
 
     # Drop OHLCV and other protected columns from LAN BEFORE the coverage check.
     # _SKIP_COLS are columns the LAN API returns that Axiom already owns.
@@ -512,11 +504,8 @@ class LanEnricher:
             log.debug("LanEnricher: no asset mapping for %s", symbol)
             return df
 
-        # The LAN API provides data at hourly (or coarser) resolution. Sub-hourly
-        # OHLCV timeframes must use "1h" for the LAN cache/API lookup so the API
-        # doesn't return empty (no 1m/5m/15m feature data exists).
-        _SUB_HOURLY = {"1m", "3m", "5m", "15m", "30m"}
-        lan_interval = "1h" if timeframe in _SUB_HOURLY else timeframe
+        # LAN API supports all intervals directly (confirmed: 5m has all 47 enrichment columns).
+        lan_interval = timeframe
 
         try:
             if live:
