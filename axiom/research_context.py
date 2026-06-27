@@ -99,12 +99,19 @@ def _build_lan_columns_section(contract: ResearchContract) -> str:
         return ""
 
     col_list = "\n".join(f"- `{c}`" for c in sorted(all_cols))
+    usage_hint = (
+        "\n\n**To use these columns:** call `create_custom_strategy` with a "
+        "BaseStrategy subclass. Guard each column with `if 'col' in df.columns:` "
+        "since enrichment availability varies by asset and date range. "
+        "Use versioned type names (liq_z_v1, liq_z_v2) when iterating on logic."
+    )
     return (
         "## LAN Metrics Available for This Backtest\n\n"
         "The following columns will be present on the DataFrame at enrich time "
         "(subject to Tier B date restrictions — see DATA SCHEMA). "
         "Reference only columns from this list in your strategy code:\n\n"
         + col_list
+        + usage_hint
     )
 
 

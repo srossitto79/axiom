@@ -276,6 +276,7 @@ def _persist_agent_verdict(strategy_id: str, verdict_result: dict) -> bool:
             },
             "params": {"type": "object", "description": "Strategy parameters dict — any params your strategy needs"},
             "bars": {"type": "integer", "description": "Number of bars to backtest against (default 8760 = 365 days of 1h). ALWAYS use at least 8760 bars (1 year) for reliable results."},
+            "strategy_id": {"type": "string", "description": "Strategy container ID returned by create_custom_strategy or register_strategy. Required to persist results and trigger promotion. If omitted, falls back to task context."},
         },
         "required": ["asset", "strategy_type", "params"],
     },
@@ -295,8 +296,9 @@ def _tool_run_backtest(params: dict) -> str:
         if not asset or not strategy_type or not isinstance(backtest_params, dict):
             return "Backtest error: asset, strategy_type, and params are required"
 
-        # Use the strategy ID from task context, falling back to agent ID
-        sid = _current_strategy_id_var.get()
+        # Prefer an explicit strategy_id (e.g. from create_custom_strategy), then
+        # fall back to the task-context var, then agent id.
+        sid = str(params.get("strategy_id") or "").strip() or _current_strategy_id_var.get()
         if not sid:
             sid = _current_agent_id_var.get() or "agent-backtest"
 
@@ -576,6 +578,152 @@ def _tool_register_strategy(params: dict) -> str:
         )
     except Exception as e:
         return f"File saved but registry reload failed: {e}. The strategy may still work on next restart."
+
+
+@register_tool(
+    name="create_custom_strategy",
+    description=(
+        "Write a custom BaseStrategy Python module, validate it via the self-healing "
+        "sandbox, register it in the strategy type map, and return the strategy_id. "
+        "Use this when the hypothesis mechanism uses enrichment columns "
+        "(liq_short_volume, l2_imbalance_*, ls_ratio, open_interest, funding_rate, etc.) "
+        "or needs non-standard logic that no built-in template family supports.\n\n"
+        "The code MUST:\n"
+        "  • subclass BaseStrategy from axiom.strategies.base\n"
+        "  • export TYPE_NAME = '<type_name>' and STRATEGY_CLASS = <ClassName>\n"
+        "  • implement generate_signal(self, df) returning a scalar Signal or dict\n"
+        "  • guard optional enrichment columns with: if 'col' in df.columns:\n\n"
+        "Use a NEW type_name each time you change logic (e.g. liq_z_v1, liq_z_v2). "
+        "Parameter-only changes do NOT require a new type_name — just re-run the backtest."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": (
+                    "Full Python source of the strategy module. Must define a class "
+                    "subclassing BaseStrategy and export STRATEGY_CLASS and TYPE_NAME."
+                ),
+            },
+            "type_name": {
+                "type": "string",
+                "description": (
+                    "Unique type identifier for this strategy, alphanumeric + underscores, ≤64 chars. "
+                    "Must match TYPE_NAME exported by the module. Use versioned names (v1, v2) "
+                    "each time the logic changes — bytecode caching prevents in-place edits."
+                ),
+            },
+            "hypothesis_id": {
+                "type": "string",
+                "description": "Parent hypothesis ID to link this strategy to. Strongly recommended.",
+            },
+            "params": {
+                "type": "object",
+                "description": "Optional default_params override dict.",
+            },
+        },
+        "required": ["code", "type_name"],
+    },
+    permissions={"role:strategy-developer", "role:quant-researcher", None},
+    category="strategy",
+)
+def _tool_create_custom_strategy(
+    code: str,
+    type_name: str,
+    hypothesis_id: str | None = None,
+    params: dict | None = None,
+) -> str:
+    """Write, validate, and register a custom BaseStrategy module."""
+    import os
+    import re
+
+    code = str(code or "").strip()
+    type_name = str(type_name or "").strip()
+    hypothesis_id = str(hypothesis_id or "").strip() or None
+
+    if not code:
+        return "Error: 'code' is required"
+    if not type_name:
+        return "Error: 'type_name' is required"
+    if not re.match(r"^[A-Za-z0-9_]{1,64}$", type_name):
+        return "Error: type_name must be alphanumeric with underscores only, ≤64 chars"
+
+    custom_dir = os.path.join(os.path.dirname(__file__), "..", "strategies", "custom")
+    filepath = os.path.join(custom_dir, f"{type_name}.py")
+
+    if os.path.exists(filepath):
+        return (
+            f"Error: type_name '{type_name}' already exists at {filepath}. "
+            "Use a new versioned name (e.g. append _v2) for logic changes, or "
+            "call run_backtest with the existing strategy_id for param-only changes."
+        )
+
+    # Validate via self-healing sandbox (lint + AST guard + execution harness)
+    try:
+        from axiom.selfheal import validate_strategy_code
+        result = validate_strategy_code(code)
+        if not result["valid"]:
+            return _format_strategy_validation_failure(result, code)
+        final_code = result.get("code") or code
+    except Exception as exc:
+        return f"Validation error: {exc}"
+
+    # Write file
+    os.makedirs(custom_dir, exist_ok=True)
+    init_path = os.path.join(custom_dir, "__init__.py")
+    if not os.path.exists(init_path):
+        with open(init_path, "w", encoding="utf-8") as f:
+            f.write('"""Custom strategies — agent-generated modules."""\n')
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(final_code)
+
+    # Register and reload
+    try:
+        from axiom.strategies.registry import reset, discover, _TYPE_MAP
+        from axiom.strategies.intake import register_custom_strategy_file
+
+        reset()
+        registration = register_custom_strategy_file(
+            file_path=filepath,
+            source="agent_create_custom",
+            hypothesis_id=hypothesis_id,
+            origin_task_id=str(_current_task_display_id_var.get() or "").strip() or None,
+        )
+        discover()
+
+        if type_name not in _TYPE_MAP:
+            return (
+                f"Warning: file saved to {filepath} but type '{type_name}' not found "
+                f"in registry. Ensure the module exports TYPE_NAME = '{type_name}' "
+                "and STRATEGY_CLASS."
+            )
+
+        registered_strategy_id = str(registration.get("strategy_id") or "").strip()
+        current_strategy_id = str(_current_strategy_id_var.get() or "").strip()
+        target_strategy_id = registered_strategy_id or current_strategy_id
+        if target_strategy_id:
+            provenance = _current_candidate_provenance(type_name)
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE strategies SET runtime_type = ?, updated_at = ? WHERE id = ?",
+                    (type_name, datetime.now(timezone.utc).isoformat(), target_strategy_id),
+                )
+            _persist_strategy_provenance(target_strategy_id, provenance)
+
+        hyp_note = f" for hypothesis {hypothesis_id}" if hypothesis_id else ""
+        if registered_strategy_id:
+            return (
+                f"Custom strategy '{type_name}' registered as {registered_strategy_id}{hyp_note}. "
+                f"Call run_backtest(strategy_id='{registered_strategy_id}', asset=...) to evaluate it."
+            )
+        return (
+            f"Custom strategy '{type_name}' registered{hyp_note} "
+            "(no strategy container id returned — check intake logs)."
+        )
+    except Exception as exc:
+        return f"File saved to {filepath} but registry reload failed: {exc}. May work after restart."
 
 
 @register_tool(

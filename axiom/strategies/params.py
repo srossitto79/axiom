@@ -318,7 +318,7 @@ _FAMILY_ALLOWED_PARAMS = {
     "gap_fill": {"min_gap_pct", "fill_target_pct", "gap_pct"},
 
     # --- Mean reversion ---
-    "zscore_reversion": {"period", "entry_z", "exit_z", "entry_threshold", "exit_threshold"},
+    "zscore_reversion": {"period", "entry_z", "exit_z", "entry_threshold", "exit_threshold", "column"},
     "rsi_divergence": {"rsi_period", "lookback", "divergence_threshold", "oversold", "overbought"},
 }
 

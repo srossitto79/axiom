@@ -109,8 +109,16 @@ def validate_strategy_code(code: str) -> dict:
             },
         }
 
-    test_code = _wrap_with_test_harness(current_code)
-    exec_result = run_code(test_code, timeout=30)
+    # Fetch enrichment columns in the MAIN process (avoids a network call inside
+    # the subprocess that can timeout and push total wall time >30s with pandas 3.x
+    # heavier imports). On failure the harness falls back to its built-in list.
+    try:
+        from axiom.lan_enricher import get_lan_enricher as _get_lan_enricher
+        _main_enrich_cols = _get_lan_enricher().available_metrics("BTCUSDT") or []
+    except Exception:
+        _main_enrich_cols = []
+    test_code = _wrap_with_test_harness(current_code, enrich_cols=_main_enrich_cols)
+    exec_result = run_code(test_code, timeout=60)
 
     valid = (
         final_lint["passed"]
@@ -144,8 +152,13 @@ def validate_strategy_code(code: str) -> dict:
     }
 
 
-def _wrap_with_test_harness(code: str) -> str:
-    """Wrap strategy code with a runtime validation harness."""
+def _wrap_with_test_harness(code: str, enrich_cols: list[str] | None = None) -> str:
+    """Wrap strategy code with a runtime validation harness.
+
+    ``enrich_cols`` should be pre-fetched by the caller from the LAN enricher in
+    the main process to avoid a subprocess network call that can timeout and push
+    total wall time over the subprocess deadline on pandas 3.x (heavier imports).
+    """
     code = normalize_generated_strategy_code(code)
     future_lines: list[str] = []
     body_lines: list[str] = []
@@ -159,6 +172,25 @@ def _wrap_with_test_harness(code: str) -> str:
     if future_block:
         future_block += "\n"
     code_body = "\n".join(body_lines).strip()
+
+    # Build the enrichment column list to embed directly in the harness script.
+    # Baseline fallback covers the columns user strategies most commonly access.
+    # The caller supplements this with the live LAN column list from the main process
+    # so the dummy DataFrame matches what a real backtest DataFrame looks like.
+    _FALLBACK = [
+        "funding_rate", "open_interest", "long_short_ratio", "ls_ratio",
+        "liq_long_volume", "liq_short_volume", "liq_total_volume", "liq_count",
+        "l2_imbalance_5_avg", "l2_spread_bps_avg",
+        "l2_large_bid_count_avg", "l2_large_ask_count_avg",
+        "taker_buy_sell_ratio",
+    ]
+    merged_cols = list(_FALLBACK)
+    for c in (enrich_cols or []):
+        if c not in merged_cols:
+            merged_cols.append(c)
+    # Embed as a Python list literal so the subprocess never needs to call the LAN API.
+    enrich_cols_repr = repr(merged_cols)
+
     return f'''\
 {future_block}
 import sys
@@ -180,22 +212,10 @@ high = np.maximum(open_, close) + 0.5
 low = np.minimum(open_, close) - 0.5
 volume = np.linspace(1000.0, 2000.0, num=100)
 
-# Dynamically fetch enrichment columns from the LAN enricher so the dummy frame
-# always reflects what a real backtest DataFrame contains. Fallback to a minimal
-# set when the enricher is unreachable (e.g. in CI or offline environments).
-_ENRICHMENT_FALLBACK = [
-    "funding_rate", "open_interest", "long_short_ratio",
-    "liq_long_volume", "liq_short_volume", "liq_total_volume",
-    "l2_imbalance_5_avg", "l2_spread_bps_avg",
-]
-try:
-    from axiom.lan_enricher import get_lan_enricher as _get_lan_enricher
-    _enrich_cols = _get_lan_enricher().available_metrics("BTCUSDT") or []
-    for _fb in _ENRICHMENT_FALLBACK:
-        if _fb not in _enrich_cols:
-            _enrich_cols.append(_fb)
-except Exception:
-    _enrich_cols = list(_ENRICHMENT_FALLBACK)
+# Enrichment columns embedded by the caller at harness-generation time.
+# No network call is made in the subprocess — the column list was fetched
+# from the LAN enricher in the main process before this script was written.
+_enrich_cols = {enrich_cols_repr}
 
 _enrich_data = {{col: np.ones(100) for col in _enrich_cols}}
 dummy_df = pd.DataFrame(
