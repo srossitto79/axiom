@@ -1,4 +1,4 @@
-﻿"""Regression tests for Batch G reliability hardening (H-R1..H-R5)."""
+"""Regression tests for Batch G reliability hardening (H-R3..H-R5)."""
 
 from __future__ import annotations
 
@@ -12,60 +12,6 @@ from axiom.db import init_db, kv_set
 @pytest.fixture(autouse=True)
 def _ensure_db():
     init_db()
-
-
-# -----------------------------------------------------------------------
-# H-R1: bot subprocess log file handle closed after Popen
-# -----------------------------------------------------------------------
-def test_h_r1_popen_failure_closes_log_file(monkeypatch, tmp_path):
-    """If Popen raises, the log file handle we opened must still be closed."""
-    from axiom.bot_factory import manager as mgr
-
-    closed_flags = []
-
-    class _TrackingFile:
-        def __init__(self, path):
-            self._path = path
-            self._closed = False
-
-        def close(self):
-            self._closed = True
-            closed_flags.append(True)
-
-        def fileno(self):
-            return 0
-
-        def writable(self):
-            return True
-
-    # Stub the path.open so we can detect whether close() was called
-    class _FakePath:
-        def __init__(self, p): self._p = p
-        def open(self, *a, **kw):
-            tf = _TrackingFile(self._p)
-            tf._opener = True
-            return tf
-        def __fspath__(self): return str(self._p)
-
-    def _fake_log_path(bot_id):
-        return _FakePath(tmp_path / f"{bot_id}.log")
-
-    def _fake_popen(*args, **kwargs):
-        # Verify the log handle was passed to us
-        assert "stdout" in kwargs
-        raise OSError("simulated spawn failure")
-
-    monkeypatch.setattr(mgr, "_bot_log_path", _fake_log_path)
-    monkeypatch.setattr(mgr.subprocess, "Popen", _fake_popen)
-    monkeypatch.setattr(mgr, "_build_isolated_env", lambda bot: {})
-    monkeypatch.setattr(mgr, "get_bot", lambda bid: {"id": bid, "name": "test", "status": "stopped"})
-    monkeypatch.setattr(mgr, "set_bot_status", lambda *a, **kw: None)
-
-    manager = mgr.BotManager()
-    with pytest.raises(OSError):
-        manager.start_bot("test-bot")
-    # The close() must have been called in the finally block.
-    assert closed_flags, "log file handle was not closed on Popen failure"
 
 
 # -----------------------------------------------------------------------
@@ -126,8 +72,12 @@ def test_h_r4_phantom_future_exception_is_logged(caplog):
         callback(future)
 
     # There should be at least one exception log with kaboom in the chain
-    matched = [rec for rec in caplog.records if "kaboom" in (rec.message or rec.getMessage())
-               or (rec.exc_info and "kaboom" in str(rec.exc_info[1]))]
+    matched = [
+        rec
+        for rec in caplog.records
+        if "kaboom" in (rec.message or rec.getMessage())
+        or (rec.exc_info and "kaboom" in str(rec.exc_info[1]))
+    ]
     assert matched, "Expected the exception to be logged"
 
 

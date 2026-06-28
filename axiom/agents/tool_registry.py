@@ -787,7 +787,14 @@ async def execute_tool(tool_name: str, tool_input: dict) -> str:
                     result = f"Tool '{tool_name}' timed out after 120s"
 
     except Exception as e:
-        result = f"Tool error: {e}"
+        # Log the full traceback server-side so a failure is diagnosable even
+        # though the model only sees the one-line summary. str(e) alone is often
+        # empty or cryptic (a bare KeyError stringifies to just the key), so
+        # always include the exception type — never hand the model an empty
+        # "Tool error: " that it can't act on.
+        log.exception("Tool '%s' raised an unhandled exception", tool_name)
+        detail = str(e).strip() or "(no message)"
+        result = f"Tool '{tool_name}' failed with {type(e).__name__}: {detail}"
 
     # ── Redact + truncate (Hermes-inspired Phase 0) ──
     # Applied to whatever string `result` ended up as — including error

@@ -22,7 +22,6 @@ from axiom.health_monitor import (
     compute_state,
     check_scheduler,
     check_brain_workers,
-    check_bots,
     check_lab_worker,
     check_pipeline_consistency,
     check_pipeline_throughput,
@@ -488,34 +487,6 @@ class TestCheckScheduler:
             ):
                 result = check_scheduler()
                 assert result.state == State.GREEN
-
-
-class TestCheckBots:
-    def test_no_bots_is_green(self):
-        with patch("axiom.db.get_running_bots", return_value=[]):
-            results = check_bots()
-            assert len(results) == 1
-            assert results[0].state == State.GREEN
-
-    def test_stale_bot_heartbeat(self):
-        bots = [{
-            "bot_id": "b1", "name": "TestBot", "pid": 1234,
-            "last_heartbeat": (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-        }]
-        with patch("axiom.db.get_running_bots", return_value=bots):
-            results = check_bots()
-            assert len(results) == 1
-            assert results[0].state == State.RED
-
-    def test_fresh_bot_heartbeat(self):
-        bots = [{
-            "bot_id": "b1", "name": "TestBot", "pid": 1234,
-            "last_heartbeat": datetime.now(timezone.utc).isoformat(),
-        }]
-        with patch("axiom.db.get_running_bots", return_value=bots):
-            results = check_bots()
-            assert len(results) == 1
-            assert results[0].state == State.GREEN
 
 
 class TestCheckLabWorker:

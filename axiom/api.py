@@ -67,7 +67,6 @@ from axiom.routers.verdict import router as verdict_router
 from axiom.routers.robustness import router as robustness_router
 from axiom.routers.gauntlet import router as gauntlet_router
 from axiom.routers.lab_regime import router as lab_regime_router
-from axiom.routers.bot_factory import router as bot_factory_router
 from axiom.routers.brain import router as brain_router
 from axiom.routers.strategy_guard import router as strategy_guard_router
 from axiom.routers.skills import router as skills_router
@@ -261,7 +260,6 @@ async def lifespan(_app: FastAPI):
     except Exception:
         log.exception("Dependency preflight check failed (continuing).")
 
-    _bot_monitor_task: asyncio.Task | None = None
     _scheduler_task: asyncio.Task | None = None
     _agent_worker_task: asyncio.Task | None = None
     _brain_worker_task: asyncio.Task | None = None
@@ -373,24 +371,6 @@ async def lifespan(_app: FastAPI):
         except Exception:
             log.exception("Failed to quiesce dormant Regime Lab during startup.")
 
-    # Seed built-in bot templates
-    try:
-        from axiom.bot_factory.templates import seed_builtin_templates
-        seeded = seed_builtin_templates()
-        if seeded:
-            log.info("Seeded %d built-in bot templates.", seeded)
-    except Exception:
-        log.exception("Failed to seed bot templates.")
-
-    # Recover bots that were running before a crash/restart
-    try:
-        from axiom.bot_factory.manager import BotManager
-        result = BotManager.get_instance().recover_bots()
-        if result.get("recovered"):
-            log.info("Recovered %d bot(s) after restart.", result["recovered"])
-    except Exception:
-        log.exception("Failed to recover bots on startup.")
-
     # Phase 4: register MCP server tools (each server's tools become
     # available to granted agents via tool_registry). Per-server failures
     # are logged and suppressed inside register_all_enabled_servers so a
@@ -405,13 +385,6 @@ async def lifespan(_app: FastAPI):
         log.exception("MCP server tool registration failed (continuing without MCP).")
 
     await _on_startup()
-
-    # Start bot heartbeat monitor as background task
-    try:
-        from axiom.bot_factory.manager import BotManager
-        _bot_monitor_task = spawn(BotManager.get_instance().monitor_bots(), name="bot-monitor")
-    except Exception:
-        log.exception("Failed to start bot monitor.")
 
     # Run critical background loops from the API process as a fallback when the
     # Discord bot runtime is unavailable. A file lock ensures only one API
@@ -566,15 +539,6 @@ async def lifespan(_app: FastAPI):
         except Exception:
             pass
 
-    await stop_background_task(_bot_monitor_task)
-
-    # Shutdown: stop all running bots
-    try:
-        from axiom.bot_factory.manager import BotManager
-        BotManager.get_instance().shutdown_all()
-    except Exception:
-        pass
-
 
 app = FastAPI(
     title="axiom API",
@@ -665,7 +629,6 @@ app.include_router(robustness_router)
 app.include_router(gauntlet_router)
 if regime_lab_enabled():
     app.include_router(lab_regime_router)
-app.include_router(bot_factory_router)
 app.include_router(brain_router)
 app.include_router(strategy_guard_router)
 app.include_router(skills_router)

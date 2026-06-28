@@ -2307,10 +2307,16 @@ def load_backtest_candles(
 
 
 
+    # Diagnostics threaded onto the returned frame's ``.attrs`` so the caller
+    # (and ultimately the agent) can see WHY a load degraded — a silent parquet
+    # failure or dropped enrichment otherwise surfaces downstream as a misleading
+    # "Insufficient data" / "0 trades" symptom the LLM debugs in the wrong place.
+    _load_warnings: list[str] = []
+
     try:
 
 
-        from axiom.data import load_parquet
+        from axiom.data import load_parquet  # noqa: F401  (diagnostics anchor)
 
 
 
@@ -2392,6 +2398,14 @@ def load_backtest_candles(
                 )
             except Exception as _enrich_exc:
                 log.warning("DataManager enrich skipped for %s/%s: %s", symbol, resolved_timeframe, _enrich_exc)
+                _load_warnings.append(
+                    f"order-flow enrichment skipped for {symbol}/{resolved_timeframe}: {_enrich_exc}"
+                )
+            try:
+                frame.attrs["load_warnings"] = list(_load_warnings)
+                frame.attrs["load_source"] = "dataset"
+            except Exception:
+                pass
             return frame
 
 
@@ -2413,6 +2427,11 @@ def load_backtest_candles(
             exc,
 
 
+        )
+
+        _load_warnings.append(
+            f"dataset/parquet load failed for {asset}/{resolved_timeframe} "
+            f"({type(exc).__name__}: {exc}); fell back to the live scanner"
         )
 
 
@@ -2486,6 +2505,14 @@ def load_backtest_candles(
         )
     except Exception as _enrich_exc:
         log.warning("DataManager enrich skipped for %s/%s: %s", asset, resolved_timeframe, _enrich_exc)
+        _load_warnings.append(
+            f"order-flow enrichment skipped for {asset}/{resolved_timeframe}: {_enrich_exc}"
+        )
+    try:
+        frame.attrs["load_warnings"] = list(_load_warnings)
+        frame.attrs["load_source"] = "scanner"
+    except Exception:
+        pass
     return frame
 
 
@@ -7684,10 +7711,22 @@ def backtest_strategy(
         )
 
 
+    # Diagnostics carried up from load_backtest_candles via frame.attrs — a
+    # dataset/parquet failure or dropped enrichment otherwise hides behind the
+    # symptoms below and the agent debugs the wrong thing.
+    try:
+        _data_warnings = list(df.attrs.get("load_warnings") or [])
+    except Exception:
+        _data_warnings = []
+
     if len(df) < 210:
 
-
-        return {"error": f"Insufficient data: {len(df)} bars (need 210+)", "trades": [], "metrics": {}}
+        _reason = f"Insufficient data: {len(df)} bars (need 210+)"
+        if _data_warnings:
+            # Surface the ROOT cause so "insufficient data" isn't mistaken for a
+            # too-short window when the real failure was an upstream data error.
+            _reason += " — likely caused by: " + "; ".join(_data_warnings)
+        return {"error": _reason, "trades": [], "metrics": {}, "warnings": _data_warnings}
 
 
 
@@ -8114,8 +8153,12 @@ def backtest_strategy(
 
         result["warning"] = risk_parity_warning
 
-
-
+    # Carry data-load/enrichment warnings into the successful result too. A
+    # backtest that ran but silently lost its order-flow enrichment can produce
+    # "0 trades" for an enrichment-dependent strategy; without this the agent
+    # rewrites correct signal logic chasing a data failure it can't see.
+    if _data_warnings:
+        result["warnings"] = list(_data_warnings)
 
 
     run_id: str | None = None

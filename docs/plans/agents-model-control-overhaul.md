@@ -97,7 +97,6 @@ empty):
 - `hypothesis_verdict.py:46-58`, `strategy_extrapolation.py:38-47` (autonomous, `fallback=True`, no pre‑check)
 - `deepdive_session.py:168-227` (no credential pre‑check; degrade path `fallback=True`)
 - `assistant_session.py:188`, `bot.py:1473` (chat degrade `fallback=True`)
-- `bot_factory/engine.py:368` (`provider='auto'`)
 
 **1.8 Auxiliary routing fail‑closed + fix the clobber bug.** Default each unset
 aux kind to the user's PRIMARY selection (not `openrouter`); callers
@@ -269,7 +268,7 @@ selectable, SOUL/AGENTS/ROLE populated per agent.
   `axiom/api_core.py`; offenders in `jobs/daily_learning.py`,
   `quant_skills_extractor.py`, `hypothesis_verdict.py`,
   `strategy_extrapolation.py`, `deepdive_session.py`, `assistant_session.py`,
-  `bot.py`, `bot_factory/engine.py`, `recall.py`, `control_plane/smart_approval.py`.
+  `bot.py`, `recall.py`, `control_plane/smart_approval.py`.
 - **Surfacing:** `axiom/health_monitor.py`, `axiom/routers/health.py`,
   `axiom/agents/provider_health.py`, `frontend/.../+layout.svelte`,
   `AgentProviderBanner.svelte`, `CriticalAlertsBanner.svelte`, `Toast.svelte`.

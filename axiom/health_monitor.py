@@ -1,7 +1,7 @@
 ﻿"""Unified Health Monitor — process reliability, data integrity, observability.
 
 Runs as a background async task inside the FastAPI process.  Aggregates
-health signals from scheduler, brain workers, bot factory, data collector,
+health signals from scheduler, brain workers, data collector,
 and lab orchestrator.  Routes alerts to Discord via emit_notification().
 """
 
@@ -511,43 +511,6 @@ def check_brain_workers() -> ComponentStatus:
         )
 
 
-def check_bots() -> list[ComponentStatus]:
-    """Check each running bot's heartbeat."""
-    results = []
-    try:
-        from axiom.db import get_running_bots
-        running = get_running_bots()
-        if not running:
-            return [ComponentStatus(
-                name="bots", state=State.GREEN,
-                last_seen=datetime.now(timezone.utc),
-                message="No bots running",
-                component_type="bot",
-            )]
-
-        for bot in running:
-            bot_id = bot.get("bot_id", "unknown")
-            name = bot.get("name", bot_id)
-            last_hb = _parse_iso(bot.get("last_heartbeat"))
-            # Bot heartbeat expected every 15s, stale at 180s
-            state = compute_state(last_hb, 180)
-            results.append(ComponentStatus(
-                name=f"bot:{name}",
-                state=state,
-                last_seen=last_hb,
-                message=f"PID {bot.get('pid', '?')}",
-                component_type="bot",
-            ))
-    except Exception as exc:
-        log.warning("Bot health check failed: %s", exc)
-        results.append(ComponentStatus(
-            name="bots", state=State.RED,
-            message=f"Check failed: {exc}",
-            component_type="bot",
-        ))
-    return results
-
-
 def check_data_collector() -> ComponentStatus:
     """Check data collection job freshness."""
     try:
@@ -948,13 +911,7 @@ async def _attempt_recovery(state: HealthState, name: str, status: ComponentStat
     success = False
 
     try:
-        if name.startswith("bot:"):
-            from axiom.bot_factory.manager import BotManager
-            result = BotManager.get_instance().recover_bots()
-            action = f"recover_bots: {result}"
-            success = bool(result.get("recovered", 0))
-
-        elif name == "data_collector":
+        if name == "data_collector":
             action = "Triggered data refetch (alert only for now)"
             success = True
 
@@ -1013,81 +970,6 @@ async def _attempt_recovery(state: HealthState, name: str, status: ComponentStat
 # ---------------------------------------------------------------------------
 # Data integrity checks (Pass 2)
 # ---------------------------------------------------------------------------
-
-def check_candle_freshness() -> list[DataCheck]:
-    """Check if candle data for actively-traded symbols is fresh."""
-    results = []
-    try:
-        from axiom.db import get_running_bots, get_db
-        running = get_running_bots()
-        if not running:
-            return [DataCheck(name="candle_freshness", passed=True, detail="No active bots")]
-
-        # Collect unique symbols from running bots
-        symbols = set()
-        for bot in running:
-            pairs = bot.get("locked_pairs")
-            if isinstance(pairs, str):
-                try:
-                    import json
-                    pairs = json.loads(pairs)
-                except Exception:
-                    pairs = []
-            if isinstance(pairs, list):
-                symbols.update(pairs)
-
-        if not symbols:
-            return [DataCheck(name="candle_freshness", passed=True, detail="No locked pairs")]
-
-        now = datetime.now(timezone.utc)
-        for symbol in symbols:
-            try:
-                with get_db() as conn:
-                    row = conn.execute(
-                        """SELECT MAX(timestamp) as latest FROM ohlcv
-                           WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1""",
-                        (symbol,),
-                    ).fetchone()
-                if row and row["latest"]:
-                    latest = _parse_iso(row["latest"])
-                    if latest:
-                        age_hours = (now - latest).total_seconds() / 3600
-                        if age_hours > 2:
-                            results.append(DataCheck(
-                                name=f"candle:{symbol}",
-                                passed=False,
-                                severity=Severity.WARNING if age_hours < 6 else Severity.CRITICAL,
-                                detail=f"Last candle {age_hours:.1f}h ago",
-                            ))
-                        else:
-                            results.append(DataCheck(
-                                name=f"candle:{symbol}",
-                                passed=True,
-                                detail=f"Fresh ({age_hours:.1f}h ago)",
-                            ))
-                else:
-                    results.append(DataCheck(
-                        name=f"candle:{symbol}",
-                        passed=False,
-                        severity=Severity.CRITICAL,
-                        detail="No candle data found",
-                    ))
-            except Exception as exc:
-                results.append(DataCheck(
-                    name=f"candle:{symbol}",
-                    passed=False,
-                    severity=Severity.WARNING,
-                    detail=f"Query failed: {exc}",
-                ))
-    except Exception as exc:
-        results.append(DataCheck(
-            name="candle_freshness",
-            passed=False,
-            severity=Severity.WARNING,
-            detail=f"Check failed: {exc}",
-        ))
-    return results
-
 
 def check_pipeline_consistency() -> list[DataCheck]:
     """Check pipeline health: gauntlet without backtest, stuck containers."""
@@ -1415,15 +1297,6 @@ class HealthMonitor:
                     except Exception as exc:
                         log.warning("Health check %s failed: %s", check_fn.__name__, exc)
 
-                # Bots return a list
-                try:
-                    bot_statuses = check_bots()
-                    for bs in bot_statuses:
-                        self.state.update_component(bs)
-                        new_statuses[bs.name] = bs
-                except Exception as exc:
-                    log.warning("Bot health check failed: %s", exc)
-
                 # Dispatch alerts based on state changes (runs in every mode).
                 _dispatch_alerts(self.state, old_statuses, new_statuses)
 
@@ -1454,7 +1327,6 @@ class HealthMonitor:
         while self._running:
             try:
                 for check_fn in (
-                    check_candle_freshness,
                     check_pipeline_consistency,
                 ):
                     try:

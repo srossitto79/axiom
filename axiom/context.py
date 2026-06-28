@@ -783,8 +783,8 @@ def _get_chroma_recall(query: str, n_results: int = 10) -> str:
 def _format_recent_trades(limit: int = 20) -> str:
     """Format recent trades for context."""
     trades = get_recent_trades(limit)
-    # Bot Factory paper trades (source='bot:{id}') are a separate product, not
-    # part of the live/strategy book the Brain reasons over — keep them out.
+    # Legacy bot-tagged paper trades are not part of the live/strategy book the
+    # Brain reasons over; keep them out.
     trades = [t for t in trades if not str(t.get("source") or "").startswith("bot:")]
     if not trades:
         return ""

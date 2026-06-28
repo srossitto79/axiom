@@ -134,10 +134,15 @@ def _persist_agent_backtest(
     params: dict,
     result: dict,
     fitness: float,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, list[str]]:
+    substep_warnings: list[str] = []
     strategy_row, merged_metrics = _load_strategy_context(strategy_id)
     if not strategy_row:
-        return False, None
+        return False, None, [
+            f"strategy container '{strategy_id}' not found — backtest results were "
+            "NOT persisted (no promotion, no later retrieval). Pass the strategy_id "
+            "returned by create_custom_strategy/register_strategy."
+        ]
 
     metrics = result.get("metrics")
     if not isinstance(metrics, dict):
@@ -196,8 +201,9 @@ def _persist_agent_backtest(
             config=config_payload,
             result_type="backtest",
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Vector store of agent backtest failed for %s: %s", strategy_id, exc)
+        substep_warnings.append(f"semantic-memory (vectordb) store failed: {exc}")
 
     try:
         _write_backtest_result_artifacts(
@@ -205,8 +211,9 @@ def _persist_agent_backtest(
             equity_curve=result.get("equity_curve"),
             benchmark_curve=result.get("benchmark_curve"),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Artifact write for agent backtest failed for %s: %s", result_id, exc)
+        substep_warnings.append(f"trade/equity artifact write failed: {exc}")
 
     _sync_strategy_metrics_and_promote_if_eligible(
         strategy_id,
@@ -219,8 +226,12 @@ def _persist_agent_backtest(
     persisted, error_msg = verify_chroma_persistence(result_id)
     if not persisted:
         log.warning(f"ChromaDB persistence check failed: {error_msg}")
+        substep_warnings.append(f"ChromaDB persistence verification failed: {error_msg}")
 
-    return True, result_id
+    # The primary row write succeeded (it raises otherwise, caught by the caller).
+    # substep_warnings carry any non-fatal degradations so the agent knows the
+    # result is persisted but, e.g., not yet searchable in semantic memory.
+    return True, result_id, substep_warnings
 
 
 def _persist_agent_verdict(strategy_id: str, verdict_result: dict) -> bool:
@@ -320,8 +331,10 @@ def _tool_run_backtest(params: dict) -> str:
         fitness = score_strategy(metrics)
         persisted = False
         result_id = None
+        persist_error: str | None = None
+        persist_warnings: list[str] = []
         try:
-            persisted, result_id = _persist_agent_backtest(
+            persisted, result_id, persist_warnings = _persist_agent_backtest(
                 strategy_id=str(sid),
                 asset=str(asset),
                 strategy_type=str(strategy_type),
@@ -330,10 +343,16 @@ def _tool_run_backtest(params: dict) -> str:
                 result=result,
                 fitness=fitness,
             )
+            # A clean run that simply couldn't find its container still carries a
+            # reason in persist_warnings — promote it to the persist_error slot so
+            # the agent sees WHY nothing was saved.
+            if not persisted and persist_warnings:
+                persist_error = "; ".join(persist_warnings)
         except Exception as exc:
-            log.warning("Agent backtest persistence failed for %s: %s", sid, exc)
+            log.exception("Agent backtest persistence failed for %s", sid)
+            persist_error = f"{type(exc).__name__}: {exc}"
 
-        return json.dumps({
+        payload = {
             "result_id": result_id,
             "persisted": persisted,
             "total_trades": metrics.get("total_trades", 0),
@@ -344,7 +363,26 @@ def _tool_run_backtest(params: dict) -> str:
             "total_return": f"{metrics.get('total_return_pct', 0):.2%}",
             "fitness": fitness,
             "avg_bars_held": metrics.get("avg_bars_held", 0),
-        }, indent=2)
+        }
+        # Surface data-load / enrichment degradations so the agent doesn't read a
+        # 0-trade run as a logic bug when the real cause was an upstream data
+        # failure, plus any non-fatal persistence sub-step failures (e.g. the
+        # result saved but isn't searchable in semantic memory yet).
+        all_warnings: list[str] = []
+        data_warnings = result.get("warnings") if isinstance(result, dict) else None
+        if data_warnings:
+            all_warnings.extend(str(w) for w in data_warnings)
+        if persisted and persist_warnings:
+            all_warnings.extend(str(w) for w in persist_warnings)
+        if all_warnings:
+            payload["warnings"] = all_warnings
+        if not persisted:
+            payload["persist_error"] = (
+                persist_error
+                or "Results were NOT persisted — they will not be available for "
+                "promotion or later retrieval. Check strategy_id is a valid container."
+            )
+        return json.dumps(payload, indent=2)
     except Exception as e:
         return f"Backtest failed: {e}"
 
@@ -367,6 +405,7 @@ def _tool_run_code(code: str) -> str:
     """
     # Check if this looks like strategy code
     is_strategy_code = "BaseStrategy" in code or "generate_signal" in code
+    selfheal_fallback_note = ""
 
     if is_strategy_code:
         try:
@@ -385,7 +424,18 @@ def _tool_run_code(code: str) -> str:
                     output += "\nAuto-fixed code available (lint issues resolved)."
                 return output
         except Exception as e:
-            log.debug("Self-heal failed, falling back to direct execution: %s", e)
+            # Don't silently downgrade strategy validation to a plain exec — the
+            # agent must know its code was NOT validated against the strategy
+            # harness (signal API, vectorized path, AST guard), otherwise it reads
+            # a passing direct-exec as a passing validation.
+            log.warning("Self-heal validation unavailable, falling back to direct execution: %s", e)
+            selfheal_fallback_note = (
+                f"\n\n[WARNING] Strategy self-heal validation could not run "
+                f"({type(e).__name__}: {e}). The code below was executed directly "
+                "WITHOUT strategy validation — passing output here does NOT mean it "
+                "passes registration. Re-run register_strategy/create_custom_strategy "
+                "to validate properly."
+            )
 
     # Direct sandbox execution
     from axiom.sandbox import run_code
@@ -397,7 +447,8 @@ def _tool_run_code(code: str) -> str:
         output += "\n(TIMED OUT)"
     if result["returncode"] != 0:
         output += f"\nExit code: {result['returncode']}"
-    return output or "(no output)"
+    output = output or "(no output)"
+    return output + selfheal_fallback_note
 
 @register_tool(
     name="register_strategy",

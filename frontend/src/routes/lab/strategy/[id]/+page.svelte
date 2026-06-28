@@ -3006,7 +3006,6 @@
 										</div>
 									{/if}
 								{/if}
-								<button on:click={() => goto(`/bot-factory/editor?strategy=${strategyId}`)} class="rounded border border-violet-700/50 bg-violet-950/30 px-3 py-1.5 text-xs text-violet-200 hover:bg-violet-900/40 transition-colors">Deploy as Bot</button>
 								<button on:click={archiveStrategyFromConfig} class="rounded border border-red-900/40 bg-red-950/20 px-3 py-1.5 text-xs text-red-300 hover:bg-red-900/30 transition-colors">Archive</button>
 							</div>
 						{/if}

@@ -2038,8 +2038,8 @@ def reconcile_exchange_positions(
         for asset, position in hl_by_asset.items():
             if asset in db_by_asset:
                 local_trades = db_by_asset.get(asset, [])
-                # Exclude Bot Factory paper trades (source='bot:{id}') only: a bot
-                # paper position on an asset the live engine also holds must not be
+                # Exclude legacy bot-tagged paper trades only: a paper position
+                # on an asset the live engine also holds must not be
                 # matched against the exchange position or counted as a duplicate
                 # live trade (that raises a false duplicate_sqlite_trades
                 # discrepancy and halts new live entries). Paper-stage STRATEGY
@@ -3178,8 +3178,8 @@ def close_all_positions() -> list[dict]:
     if closed_assets:
         with get_db() as conn:
             placeholders = ",".join("?" for _ in closed_assets)
-            # Exclude Bot Factory paper trades (source='bot:{id}'): the kill-switch
-            # flattened LIVE exchange positions, and a bot paper position on the
+            # Exclude legacy bot-tagged paper trades: the kill-switch
+            # flattened LIVE exchange positions, and a paper position on the
             # same asset must not be force-closed at the live flatten price (it
             # never reached the exchange — that would fabricate PnL on a paper book).
             rows = conn.execute(
