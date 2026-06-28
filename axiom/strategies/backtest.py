@@ -1,4 +1,4 @@
-﻿"""Backtest engine â€” run strategy rules against historical data and compute metrics.
+"""Backtest engine â€” run strategy rules against historical data and compute metrics.
 
 
 
@@ -7684,6 +7684,47 @@ def backtest_strategy(
 
 
 
+    # Smart window selection when start/end not explicitly set: align to where
+    # the enrichment columns the strategy references actually have data, so a run
+    # never wastes the front of the window on NaN-poisoned bars (e.g. liq columns
+    # only exist from Dec 2025) nor the tail on a metric that stopped collecting.
+    _data_availability: dict | None = None
+    if not start_date or not end_date:
+        try:
+            from axiom.auto_trim import maybe_select_window
+            _code = None
+            try:
+                _modname = original_strategy_type.replace("-", "_").replace("/", "_")
+                _p1 = Path(__file__).resolve().parent.parent / "strategies" / "custom" / f"{_modname}.py"
+                _p2 = Path(__file__).resolve().parent.parent / "strategies" / "custom" / f"manual_{_modname}.py"
+                if _p1.exists():
+                    _code = _p1.read_text(encoding="utf-8", errors="replace")
+                elif _p2.exists():
+                    _code = _p2.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                _code = None
+            _sel_start, _sel_end, _data_availability = maybe_select_window(
+                strategy_type=original_strategy_type,
+                params=params,
+                strategy_code=_code,
+                symbol=asset,
+                timeframe=resolved_timeframe,
+                explicit_start=start_date,
+                explicit_end=end_date,
+            )
+            if _data_availability and not _data_availability.get("usable", True):
+                log.warning(
+                    "Data availability warning for %s: %s",
+                    strategy_id, _data_availability.get("summary"),
+                )
+            if _sel_start and _sel_start != start_date:
+                log.info("Auto-selected start for %s: %s", strategy_id, _sel_start)
+                start_date = _sel_start
+            if _sel_end and _sel_end != end_date:
+                log.info("Auto-selected end for %s: %s", strategy_id, _sel_end)
+                end_date = _sel_end
+        except Exception as _trim_err:
+            log.debug("Window auto-selection unavailable for %s: %s", strategy_id, _trim_err)
 
 
     # Fetch historical data (or use pre-loaded candles from caller)
@@ -7718,6 +7759,14 @@ def backtest_strategy(
         _data_warnings = list(df.attrs.get("load_warnings") or [])
     except Exception:
         _data_warnings = []
+
+    # Surface a non-usable enrichment availability verdict (e.g. referenced
+    # columns with non-overlapping date ranges) so a "0 trades"/"insufficient
+    # data" symptom points the agent at the real cause.
+    if _data_availability and not _data_availability.get("usable", True):
+        _summary = _data_availability.get("summary")
+        if _summary:
+            _data_warnings.append(_summary)
 
     if len(df) < 210:
 

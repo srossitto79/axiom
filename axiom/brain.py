@@ -3244,7 +3244,8 @@ def create_strategy(
 
     log.info("Created strategy container: %s (%s %s) display=%s", created_id, strategy_type, symbol, display_id)
     log_activity("info", "brain", f"Created strategy container {display_id}: {created_id}")
-    return {
+
+    result = {
         "id": created_id,
         "name": strategy_name,
         "status": target_stage,
@@ -3252,6 +3253,22 @@ def create_strategy(
         "owner": resolved_owner,
         "display_id": display_id,
     }
+
+    try:
+        from axiom.auto_trim import compute_data_availability
+        availability = compute_data_availability(
+            asset=symbol,
+            timeframe=timeframe,
+            strategy_type=strategy_type,
+            params=canonical_params,
+        )
+        result["data_availability"] = availability
+        if availability.get("summary"):
+            log.info("Data availability for %s: %s", created_id, availability["summary"])
+    except Exception as exc:
+        log.debug("Data-availability report skipped for %s: %s", created_id, exc)
+
+    return result
 
 
 def update_strategy_params(strategy_id: str, params: dict, *, actor: str = "system"):

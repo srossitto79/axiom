@@ -10251,8 +10251,27 @@ def register_manual_backtest_strategy(body: ManualStrategyBody) -> dict:
     if result.get("lint_issues"):
         warnings.append(f"Auto-fixed {len(result['lint_issues'])} lint issue(s) before registering.")
 
-    return {"valid": True, "registered": registered, "strategy_name": type_name,
-            "default_params": default_params, "errors": errors, "warnings": warnings}
+    response = {"valid": True, "registered": registered, "strategy_name": type_name,
+                "default_params": default_params, "errors": errors, "warnings": warnings}
+
+    try:
+        from axiom.auto_trim import compute_data_availability
+        _asset = str(default_params.get("_asset") or "BTC").strip()
+        _tf = str(default_params.get("_timeframe") or "1h").strip() or "1h"
+        availability = compute_data_availability(
+            asset=_asset,
+            timeframe=_tf,
+            strategy_type=type_name,
+            params=default_params,
+            strategy_code=final_code,
+        )
+        response["data_availability"] = availability
+        if availability.get("summary"):
+            log.info("Data availability for manual strategy %s: %s", type_name, availability["summary"])
+    except Exception as exc:
+        log.debug("Data-availability report skipped for manual strategy %s: %s", type_name, exc)
+
+    return response
 
 
 def send_manual_strategy_to_forge(body: SendToForgeBody) -> dict:
@@ -10330,7 +10349,31 @@ def send_manual_strategy_to_forge(body: SendToForgeBody) -> dict:
     except Exception:
         pass
 
-    return {"ok": True, "strategy_id": strategy_id, "display_id": display_id, "stage": "quick_screen", "type": strategy_type}
+    response = {"ok": True, "strategy_id": strategy_id, "display_id": display_id, "stage": "quick_screen", "type": strategy_type}
+
+    try:
+        from axiom.auto_trim import compute_data_availability
+        # For code mode try to load the saved source so column detection is richer.
+        _strategy_code = None
+        if mode == "code":
+            try:
+                _strategy_code = open(manual_path, encoding="utf-8").read()
+            except Exception:
+                pass
+        availability = compute_data_availability(
+            asset=asset,
+            timeframe=timeframe,
+            strategy_type=strategy_type,
+            params=params,
+            strategy_code=_strategy_code,
+        )
+        response["data_availability"] = availability
+        if availability.get("summary"):
+            log.info("Data availability for forge strategy %s: %s", strategy_id, availability["summary"])
+    except Exception as exc:
+        log.debug("Data-availability report skipped for forge strategy %s: %s", strategy_id, exc)
+
+    return response
 
 
 def _collect_backtest_execution_controls(payload: object) -> dict[str, object]:

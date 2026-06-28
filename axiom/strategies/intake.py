@@ -703,7 +703,35 @@ def register_custom_strategy_file(
         strategy_id,
         source,
     )
-    return registration.to_dict()
+
+    result = registration.to_dict()
+
+    # Data-availability report: scan which enrichment columns the strategy
+    # references and, against the cached LAN /metrics/ranges, tell the agent the
+    # window it can actually backtest over (the binding column constraints). This
+    # is the registration half of the two-step availability check — the
+    # backtester applies the same computation to pick start/end when none given.
+    try:
+        from axiom.auto_trim import compute_data_availability
+
+        try:
+            strategy_code = Path(source_ref).read_text(encoding="utf-8-sig", errors="replace")
+        except Exception:
+            strategy_code = None
+        availability = compute_data_availability(
+            asset=asset,
+            timeframe=_intended_timeframe(stored_params),
+            strategy_type=type_name,
+            params=stored_params,
+            strategy_code=strategy_code,
+        )
+        result["data_availability"] = availability
+        if availability.get("summary"):
+            log.info("Data availability for %s: %s", strategy_id, availability["summary"])
+    except Exception as exc:
+        log.debug("Data-availability report skipped for %s: %s", strategy_id, exc)
+
+    return result
 
 
 def auto_intake_recent_files(*, max_age_minutes: int = 10) -> dict:
