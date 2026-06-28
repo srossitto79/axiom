@@ -45,6 +45,7 @@ from axiom.hypotheses import (
     HypothesisPoolFullError,
     add_hypothesis_artifact,
     create_hypothesis,
+    get_hypothesis,
     get_hypothesis_spawn_stats,
     list_hypothesis_artifacts,
     record_data_gap,
@@ -632,6 +633,35 @@ def _tool_list_hypothesis_artifacts(params: dict) -> str:
     # third-party URLs (operator-pasted). Wrap in the untrusted envelope so it is
     # labeled inert data, symmetric with the discover_*/inspect_* tools.
     return _wrap_untrusted({"ok": True, "artifacts": artifacts})
+
+
+@register_tool(
+    name="get_hypothesis",
+    description=(
+        "Read the current fields for an existing hypothesis by hypothesis_id. "
+        "Use this to inspect title, thesis, mechanism, target assets, target "
+        "timeframes, and why_now before creating linked strategies."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "hypothesis_id": {"type": "string"},
+        },
+        "required": ["hypothesis_id"],
+    },
+    permissions={"role:strategy-developer", None},
+)
+def _tool_get_hypothesis(params: dict) -> str:
+    hypothesis_id = str(params.get("hypothesis_id") or "").strip()
+    if not hypothesis_id:
+        return json.dumps({"ok": False, "error": "hypothesis_id is required"})
+    try:
+        hypothesis = get_hypothesis(hypothesis_id)
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc) or "lookup failed"})
+    if not hypothesis:
+        return json.dumps({"ok": False, "error": "hypothesis not found", "hypothesis_id": hypothesis_id})
+    return json.dumps({"ok": True, "hypothesis": hypothesis})
 
 
 @register_tool(

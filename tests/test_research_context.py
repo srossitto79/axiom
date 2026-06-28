@@ -231,3 +231,77 @@ def test_run_agent_task_uses_research_context_for_research_tasks(AXIOM_db, monke
     assert result["response"] == "done"
     assert ("research", "exploration", ["ohlcv", "funding_rates"]) in calls
     assert any(call[0] == "call" and str(call[1]).startswith("research-context") for call in calls)
+
+
+def test_run_agent_task_injects_hypothesis_context_for_bound_tasks(AXIOM_db, monkeypatch):
+    from axiom.agents import runner
+    from axiom.db import get_db
+    from axiom.hypotheses import create_hypothesis
+
+    hypothesis = create_hypothesis(
+        title="Funding dislocation mean reversion",
+        market_thesis="Crowded positive funding precedes short-term mean reversion.",
+        mechanism="Fade stretched funding after liquidation spikes.",
+        why_now="Perps remain crowded after sharp rotations.",
+        lane="benchmarking",
+        source_type="test",
+        target_assets=["BTC-PERP"],
+        target_timeframes=["15m"],
+    )
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO agents (id, name, role, created_at) "
+            "VALUES ('strategy-developer', 'Strategy Developer', 'strategy-developer', datetime('now'))"
+        )
+        conn.execute(
+            """
+            INSERT INTO agent_tasks
+                (agent_id, type, title, description, status, input_data, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            """,
+            (
+                "strategy-developer",
+                "develop_candidate",
+                "Develop candidate",
+                "Create a linked strategy.",
+                "pending",
+                json.dumps({"hypothesis_id": hypothesis["id"]}),
+            ),
+        )
+        task = dict(
+            conn.execute(
+                "SELECT * FROM agent_tasks WHERE agent_id = 'strategy-developer' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        )
+
+    captured: dict[str, str] = {}
+
+    async def _fake_call_with_tools(provider, model_id, messages, system, tools=None, **kwargs):
+        captured["prompt"] = messages[-1]["content"]
+        return ("done", {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
+
+    monkeypatch.setattr(runner, "_check_task_owner", lambda *args, **kwargs: (None, True))
+    monkeypatch.setattr(runner, "read_workspace", lambda *args, **kwargs: "")
+    monkeypatch.setattr(runner, "_get_tools_for_agent", lambda *args, **kwargs: [])
+    monkeypatch.setattr(runner, "_call_with_tools", _fake_call_with_tools)
+    monkeypatch.setattr(runner, "append_workspace", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runner, "log_activity", lambda *args, **kwargs: None)
+
+    asyncio.run(
+        runner.run_agent_task(
+            {
+                "id": "strategy-developer",
+                "name": "Strategy Developer",
+                "model": "openai",
+                "model_id": "gpt-5.2",
+            },
+            task,
+        )
+    )
+
+    prompt = captured["prompt"]
+    assert "## HYPOTHESIS CONTEXT" in prompt
+    assert "Funding dislocation mean reversion" in prompt
+    assert "BTC-PERP" in prompt
+    assert "15m" in prompt
+    assert "Crowded positive funding" in prompt

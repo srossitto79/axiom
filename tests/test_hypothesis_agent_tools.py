@@ -140,6 +140,30 @@ def test_create_hypothesis_blocked_inside_candidate_task(AXIOM_db):
     assert count == 0
 
 
+def test_get_hypothesis_tool_returns_strategy_context_fields(AXIOM_db):
+    tools_research = importlib.import_module("axiom.agents.tools_research")
+    from axiom.hypotheses import create_hypothesis
+
+    hypothesis = create_hypothesis(
+        title="Funding dislocation mean reversion",
+        market_thesis="Crowded positive funding precedes short-term mean reversion.",
+        mechanism="Fade stretched funding after liquidation spikes.",
+        why_now="Perps remain crowded after sharp rotations.",
+        lane="benchmarking",
+        source_type="test",
+        target_assets=["BTC-PERP"],
+        target_timeframes=["15m"],
+    )
+
+    result = json.loads(tools_research._tool_get_hypothesis({"hypothesis_id": hypothesis["id"]}))
+
+    assert result["ok"] is True
+    assert result["hypothesis"]["id"] == hypothesis["id"]
+    assert result["hypothesis"]["target_assets"] == ["BTC-PERP"]
+    assert result["hypothesis"]["target_timeframes"] == ["15m"]
+    assert "Crowded positive funding" in result["hypothesis"]["market_thesis"]
+
+
 def test_create_hypothesis_allowed_for_propose_crucible_task(AXIOM_db):
     tools_research = importlib.import_module("axiom.agents.tools_research")
     from axiom.agents.context import reset_tool_context, set_tool_context

@@ -1024,8 +1024,8 @@ def _enqueue_generate_strategies(
     description = (
         f"An operator requested candidate strategies for hypothesis {display_id}. "
         f"The hypothesis fields (title, thesis, mechanism, target_assets, "
-        f"target_timeframes) are already populated — read them via get_hypothesis "
-        f"before acting. Do NOT rewrite them.\n\n"
+        f"target_timeframes) are already populated in the HYPOTHESIS CONTEXT "
+        f"attached to this task. Do NOT rewrite them.\n\n"
         f"Your job, strictly:\n"
         f"1. Read hypothesis {hypothesis['id']} and its linked artifacts.\n"
         f"2. Spawn 1-3 candidate strategies for hypothesis_id={hypothesis['id']}, "
@@ -1448,7 +1448,7 @@ def _enqueue_operator_manual_research(
     description = (
         f"An operator manually entered hypothesis {display_id}. Title, thesis, "
         f"mechanism, target assets, and target timeframes are already populated "
-        f"— read them via get_hypothesis before acting.\n\n"
+        f"in the HYPOTHESIS CONTEXT attached to this task.\n\n"
         f"Your job, in order:\n"
         f"1. Read the hypothesis fields; do NOT rewrite them unless clearly wrong.\n"
         f"2. Call record_data_gap for anything material that's missing to implement "

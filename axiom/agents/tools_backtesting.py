@@ -1001,6 +1001,7 @@ def _tool_backtesting(tool_name: str, params: dict) -> str:
             crucible_id = str(validation.crucible_id or crucible_id).strip()
             hypothesis_id = str(validation.hypothesis_id or hypothesis_id).strip()
             provenance = _current_candidate_provenance(crucible_id)
+            hypothesis_timeframe = _get_hypothesis_tf(hypothesis_id)
             
             # Check if this is a certified strategy family that doesn't need rule-blobs
             if _is_certified_strategy_family(strategy_type, strategy_name):
@@ -1012,7 +1013,7 @@ def _tool_backtesting(tool_name: str, params: dict) -> str:
                     notes=params.get("notes", ""),
                     params=params.get("params"),
                     symbol=params.get("symbol", ""),
-                    timeframe=params.get("timeframe") or _get_hypothesis_tf(hypothesis_id) or "1h",
+                    timeframe=hypothesis_timeframe or params.get("timeframe") or "1h",
                 )
             else:
                 # Custom strategies: send full rule-blob configuration
@@ -1027,7 +1028,7 @@ def _tool_backtesting(tool_name: str, params: dict) -> str:
                     notes=params.get("notes", ""),
                     params=params.get("params"),
                     symbol=params.get("symbol", ""),
-                    timeframe=params.get("timeframe") or _get_hypothesis_tf(hypothesis_id) or "1h",
+                    timeframe=hypothesis_timeframe or params.get("timeframe") or "1h",
                 )
             # Ensure consistent ID return format for backward compatibility
             if isinstance(result, dict) and "id" not in result and "strategy_id" in result:
@@ -1042,8 +1043,8 @@ def _tool_backtesting(tool_name: str, params: dict) -> str:
                 fee_bps=params.get("fee_bps", 4.5),
                 slippage_bps=params.get("slippage_bps", 2.0),
                 timeframe=(
-                    params.get("timeframe")
-                    or _get_hypothesis_tf(params.get("hypothesis_id", ""))
+                    _get_hypothesis_tf(params.get("hypothesis_id", ""))
+                    or params.get("timeframe")
                     or _get_strategy_or_hypothesis_tf(params.get("strategy_id"))
                 ),
                 request_source="agent_tool",

@@ -894,6 +894,52 @@ def _hypothesis_target_strategy_count() -> int:
         return 10
 
 
+def _extract_hypothesis_context_id(input_data: dict | None) -> str | None:
+    if not isinstance(input_data, dict):
+        return None
+    for key in ("hypothesis_id", "crucible_id"):
+        value = str(input_data.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _format_hypothesis_context_for_prompt(input_data: dict | None) -> str:
+    hypothesis_id = _extract_hypothesis_context_id(input_data)
+    if not hypothesis_id:
+        return ""
+    try:
+        from axiom.hypotheses import get_hypothesis
+
+        hypothesis = get_hypothesis(hypothesis_id)
+    except Exception:
+        log.exception("Failed to load hypothesis context for task prompt: %s", hypothesis_id)
+        return ""
+    if not hypothesis:
+        return ""
+
+    def _list_text(value: object) -> str:
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(item).strip() for item in value if str(item).strip()) or "not specified"
+        text = str(value or "").strip()
+        return text or "not specified"
+
+    lines = [
+        "",
+        "",
+        "## HYPOTHESIS CONTEXT",
+        f"- Hypothesis ID: {hypothesis.get('id') or hypothesis_id}",
+        f"- Display ID: {hypothesis.get('display_id') or 'not specified'}",
+        f"- Title: {hypothesis.get('title') or 'not specified'}",
+        f"- Target Assets: {_list_text(hypothesis.get('target_assets'))}",
+        f"- Target Timeframes: {_list_text(hypothesis.get('target_timeframes'))}",
+        f"- Market Thesis: {hypothesis.get('market_thesis') or 'not specified'}",
+        f"- Mechanism: {hypothesis.get('mechanism') or 'not specified'}",
+        f"- Why Now: {hypothesis.get('why_now') or 'not specified'}",
+    ]
+    return "\n".join(lines)
+
+
 def _assign_follow_through_task(**kwargs):
     from axiom.brain import assign_task
 
@@ -1249,6 +1295,7 @@ async def _run_agent_task_inner(
         prompt = f"# Task: {task.get('title', 'Untitled')}\n\n{task.get('description', '')}"
         if input_data:
             prompt += f"\n\n## Input Data\n```json\n{json.dumps(input_data, indent=2)[:3000]}\n```"
+        prompt += _format_hypothesis_context_for_prompt(input_data)
 
         # Call AI with tool loop
         provider = agent.get("model", "openai")

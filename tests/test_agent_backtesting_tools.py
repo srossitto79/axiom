@@ -581,6 +581,46 @@ def test_jbt_create_strategy_defaults_timeframe_from_hypothesis(AXIOM_db, monkey
     assert captured["timeframe"] == "4h"
 
 
+def test_jbt_create_strategy_prefers_hypothesis_timeframe_over_agent_input(AXIOM_db, monkeypatch):
+    captured: dict[str, object] = {}
+    hypothesis = create_hypothesis(
+        title="Four hour continuation override",
+        market_thesis="Four hour regimes can sustain continuation better than hourly noise.",
+        mechanism="Trade momentum only on the target timeframe.",
+        why_now="The operator selected a four hour target.",
+        lane="benchmarking",
+        source_type="test",
+        target_assets=["BTC/USDT"],
+        target_timeframes=["4h"],
+    )
+
+    class FakeClient:
+        def create_strategy(self, **kwargs):
+            captured.update(kwargs)
+            _insert_strategy("S4H02", stage="quick_screen")
+            return {"strategy_id": "S4H02"}
+
+    monkeypatch.setattr(tools_mod, "_check_backtesting_available", lambda: True)
+    monkeypatch.setattr("axiom.backtesting.get_client", lambda: FakeClient())
+
+    result = json.loads(
+        _tool_backtesting(
+            "AXIOM_create_strategy",
+            {
+                "name": "MACD wrong timeframe candidate",
+                "hypothesis_id": hypothesis["id"],
+                "strategy_type": "macd",
+                "symbol": "BTC/USDT",
+                "timeframe": "1h",
+                "params": {"fast": 5, "slow": 13, "signal": 3},
+            },
+        )
+    )
+
+    assert result["id"] == "S4H02"
+    assert captured["timeframe"] == "4h"
+
+
 def test_jbt_run_backtest_does_not_force_one_hour_when_timeframe_omitted(AXIOM_db, monkeypatch):
     captured: dict[str, object] = {}
 
