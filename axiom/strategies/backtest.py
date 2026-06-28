@@ -37,6 +37,7 @@ import sys
 import time
 import concurrent.futures
 import multiprocessing
+from pathlib import Path
 
 
 from datetime import datetime, timezone
@@ -2354,6 +2355,12 @@ def load_backtest_candles(
 
                 )
 
+                # When only end_date is set (no explicit start), the filter
+                # doesn't trim the front — still cap to required_bars so we
+                # don't return the entire parquet history.
+                if not start_date and len(frame) > required_bars:
+                    frame = frame.tail(required_bars)
+
 
             elif len(frame) > required_bars:
 
@@ -2460,6 +2467,11 @@ def load_backtest_candles(
 
 
         )
+
+        # When only end_date is set (no explicit start), the filter doesn't
+        # trim the front — still cap to required_bars.
+        if not start_date and len(frame) > required_bars:
+            frame = frame.tail(required_bars)
 
 
     elif len(frame) > required_bars:
@@ -7731,10 +7743,15 @@ def backtest_strategy(
 
 
     if candles_df is not None and not candles_df.empty:
-
-
-        df = candles_df.tail(resolved_bars) if len(candles_df) > resolved_bars else candles_df
-
+        df = _normalize_backtest_frame(candles_df)
+        if start_date or end_date:
+            df = _filter_backtest_frame_to_window(
+                df, start_date=start_date, end_date=end_date, warmup_bars=210
+            )
+            if not start_date and len(df) > resolved_bars:
+                df = df.tail(resolved_bars)
+        elif len(df) > resolved_bars:
+            df = df.tail(resolved_bars)
 
     else:
 
@@ -7808,10 +7825,8 @@ def backtest_strategy(
 
 
 
-    data_start = df.index[0].isoformat()
-
-
-    data_end = df.index[-1].isoformat()
+    data_start = start_date or df.index[0].isoformat()
+    data_end = end_date or df.index[-1].isoformat()
 
 
 

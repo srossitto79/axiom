@@ -658,5 +658,13 @@ def maybe_select_window(
             if default_ts is None or start_ts is None or start_ts > default_ts:
                 start = avail["start"]
         if not end and avail.get("end"):
-            end = avail["end"]
+            # Only cap the end when data genuinely stopped collecting — i.e., the
+            # last known point is meaningfully in the past. Active columns have
+            # avail["end"] ≈ now (hours old), which is not a real constraint and
+            # would cause load_backtest_candles to return the full parquet history
+            # instead of the last N bars.
+            end_ts = _parse_ts(avail["end"])
+            now = dt.datetime.now(dt.timezone.utc)
+            if end_ts is not None and end_ts < now - dt.timedelta(days=3):
+                end = avail["end"]
     return start, end, avail
