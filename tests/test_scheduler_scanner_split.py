@@ -257,6 +257,94 @@ def test_scanner_jobs_are_exempt_from_backpressure_gate():
     assert scheduler_mod._PIPELINE_INTAKE_JOB_IDS <= scheduler_mod._AUTONOMY_BACKPRESSURE_JOB_IDS
 
 
+def test_generation_pause_only_skips_new_idea_jobs_in_semi_auto(monkeypatch, AXIOM_db):
+    import axiom.scheduler as scheduler_mod
+
+    assert scheduler_mod._GENERATION_JOB_IDS == {
+        "Axiom-crucible-discovery",
+        "Axiom-ideation-daily",
+    }
+
+    now = datetime.now(timezone.utc)
+    jobs = [
+        {
+            "id": "Axiom-crucible-discovery",
+            "name": "Crucible Discovery",
+            "schedule_type": "interval",
+            "schedule_expr": "60000",
+            "timezone": "UTC",
+            "command": "crucible-discovery",
+            "payload": json.dumps({"kind": "crucible_discovery"}),
+            "should_skip": True,
+        },
+        {
+            "id": "Axiom-ideation-daily",
+            "name": "Daily Ideation Cycle",
+            "schedule_type": "interval",
+            "schedule_expr": "60000",
+            "timezone": "UTC",
+            "command": "ideation-cycle",
+            "payload": json.dumps({"kind": "evolution_ideation"}),
+            "should_skip": True,
+        },
+        {
+            "id": "Axiom-crucible-planner",
+            "name": "Crucible Planner",
+            "schedule_type": "interval",
+            "schedule_expr": "60000",
+            "timezone": "UTC",
+            "command": "crucible-planner",
+            "payload": json.dumps({"kind": "crucible_planner"}),
+            "should_skip": False,
+        },
+        {
+            "id": "Axiom-testing-cycle",
+            "name": "Validation Cycle",
+            "schedule_type": "interval",
+            "schedule_expr": "60000",
+            "timezone": "UTC",
+            "command": "testing-cycle",
+            "payload": json.dumps({"kind": "evolution_testing"}),
+            "should_skip": False,
+        },
+        {
+            "id": "Axiom-auto-intake",
+            "name": "Auto Strategy Intake",
+            "schedule_type": "interval",
+            "schedule_expr": "60000",
+            "timezone": "UTC",
+            "command": "auto-intake",
+            "payload": json.dumps({"kind": "auto_intake"}),
+            "should_skip": False,
+        },
+    ]
+
+    for job in jobs:
+        skipped: list[tuple[str, dict]] = []
+        marked_running: list[str] = []
+        _stub_tick_environment(monkeypatch, scheduler_mod, job, now, skipped, marked_running)
+        monkeypatch.setattr(scheduler_mod, "is_generation_paused", lambda: True)
+        monkeypatch.setattr(scheduler_mod, "_autonomy_backpressure_status", lambda: (False, ""))
+
+        asyncio.run(scheduler_mod.tick())
+
+        if job["should_skip"]:
+            assert marked_running == []
+            assert skipped == [
+                (
+                    job["id"],
+                    {
+                        "status": "paused",
+                        "reason": "Strategy generation paused by operator",
+                        "next_run": "2026-04-21T01:00:00+00:00",
+                    },
+                )
+            ]
+        else:
+            assert skipped == [], f"{job['id']} must keep running in semi-auto"
+            assert marked_running == [job["id"]]
+
+
 def _stub_tick_environment(monkeypatch, scheduler_mod, job, now, skipped, marked_running):
     monkeypatch.setattr(scheduler_mod, "_record_scheduler_tick_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(scheduler_mod, "_apply_runtime_scheduler_overrides", lambda: 0)

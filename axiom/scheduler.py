@@ -148,11 +148,8 @@ _DEFERRABLE_JOBS = {
     "Axiom-quant-skills-consolidation",
 }
 _GENERATION_JOB_IDS = {
-    "Axiom-crucible-planner",
     "Axiom-crucible-discovery",
     "Axiom-ideation-daily",
-    "Axiom-testing-cycle",
-    "Axiom-auto-intake",
 }
 # Jobs that CREATE new work — blocked when pipeline is saturated.
 # Testing is NOT included because it DRAINS the backlog.
