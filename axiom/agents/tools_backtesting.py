@@ -18,9 +18,14 @@ log = logging.getLogger("axiom.agents.runner")
 
 
 
-def _get_hypothesis_tf(hypothesis_id: str) -> str | None:
+def _get_hypothesis_tfs(hypothesis_id: str) -> list[str]:
+    """Return all valid target_timeframes for a hypothesis as a list.
+
+    Used by the override gate below to validate agent-chosen TFs against
+    the hypothesis's approved list.
+    """
     if not hypothesis_id:
-        return None
+        return []
     try:
         with get_db() as conn:
             row = conn.execute(
@@ -31,13 +36,24 @@ def _get_hypothesis_tf(hypothesis_id: str) -> str | None:
             raw = row[0]
             tfs = json.loads(raw) if isinstance(raw, str) else raw
             if isinstance(tfs, list):
+                cleaned = []
                 for tf in tfs:
-                    cleaned = str(tf or "").strip().lower()
-                    if cleaned and cleaned != "unspecified":
-                        return cleaned
+                    c = str(tf or "").strip().lower()
+                    if c and c != "unspecified":
+                        cleaned.append(c)
+                return cleaned
     except Exception:
         pass
-    return None
+    return []
+
+
+def _get_hypothesis_tf(hypothesis_id: str) -> str | None:
+    """Return the first valid target_timeframe for a hypothesis.
+
+    Convenience accessor; prefer _get_hypothesis_tfs when you need the list.
+    """
+    tfs = _get_hypothesis_tfs(hypothesis_id)
+    return tfs[0] if tfs else None
 
 
 def _with_hypothesis_timeframe(params: object, hypothesis_id: str | None) -> object:
@@ -700,14 +716,21 @@ def _tool_register_strategy(params: dict) -> str:
     description=(
         "Write a custom BaseStrategy Python module, validate it via the self-healing "
         "sandbox, register it in the strategy type map, and return the strategy_id. "
-        "Use this when the hypothesis mechanism uses enrichment columns "
-        "(liq_short_volume, l2_imbalance_*, ls_ratio, open_interest, funding_rate, etc.) "
-        "or needs non-standard logic that no built-in template family supports.\n\n"
+        "Use this when the hypothesis mechanism uses non-OHLCV columns (enrichment "
+        "metrics like liquidations, L2 order book, funding, open interest, long/short "
+        "ratio, on-chain/social) or needs non-standard logic that no built-in template "
+        "family supports. The exact columns and date ranges available for your target "
+        "assets/timeframes are in the DATA AVAILABILITY section of your task context.\n\n"
         "The code MUST:\n"
         "  • subclass BaseStrategy from axiom.strategies.base\n"
         "  • export TYPE_NAME = '<type_name>' and STRATEGY_CLASS = <ClassName>\n"
+        "  • implement ALL 4 abstract properties required by BaseStrategy:\n"
+        "    - name(self) -> str        — human-readable label, e.g. \'LiqShortV1\'\n"
+        "    - asset(self) -> str       — trading pair, e.g. \'BTC/USDT\'\n"
+        "    - strategy_type(self) -> str — logical category, short descriptive label\n"
+        "    - default_params(self) -> dict — e.g. {\'z_entry\': 1.5, \'lookback\': 20}\n"
         "  • implement generate_signal(self, df) returning a scalar Signal or dict\n"
-        "  • guard optional enrichment columns with: if 'col' in df.columns:\n\n"
+        "  • guard optional enrichment columns with: if \'col\' in df.columns:\n\n"
         "SIGNAL API (this is the ONLY signal interface — do NOT invent others):\n"
         "  from axiom.strategies.base import BaseStrategy, Signal\n"
         "  Signal is a dataclass: Signal(entry_signal: bool, exit_signal: bool,\n"
@@ -1002,6 +1025,14 @@ def _tool_backtesting(tool_name: str, params: dict) -> str:
             hypothesis_id = str(validation.hypothesis_id or hypothesis_id).strip()
             provenance = _current_candidate_provenance(crucible_id)
             hypothesis_timeframe = _get_hypothesis_tf(hypothesis_id)
+            agent_tf = params.get("timeframe")
+            # Only override when the agent doesn't specify a timeframe.
+            # If the agent explicitly chooses one, trust it — it may see
+            # data characteristics we didn't encode in target_timeframes.
+            if agent_tf:
+                resolved_tf = agent_tf
+            else:
+                resolved_tf = hypothesis_timeframe or "1h"
             
             # Check if this is a certified strategy family that doesn't need rule-blobs
             if _is_certified_strategy_family(strategy_type, strategy_name):
@@ -1013,7 +1044,7 @@ def _tool_backtesting(tool_name: str, params: dict) -> str:
                     notes=params.get("notes", ""),
                     params=params.get("params"),
                     symbol=params.get("symbol", ""),
-                    timeframe=hypothesis_timeframe or params.get("timeframe") or "1h",
+                    timeframe=resolved_tf,
                 )
             else:
                 # Custom strategies: send full rule-blob configuration
@@ -1028,7 +1059,7 @@ def _tool_backtesting(tool_name: str, params: dict) -> str:
                     notes=params.get("notes", ""),
                     params=params.get("params"),
                     symbol=params.get("symbol", ""),
-                    timeframe=hypothesis_timeframe or params.get("timeframe") or "1h",
+                    timeframe=resolved_tf,
                 )
             # Ensure consistent ID return format for backward compatibility
             if isinstance(result, dict) and "id" not in result and "strategy_id" in result:

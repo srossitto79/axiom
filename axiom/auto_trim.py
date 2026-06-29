@@ -257,6 +257,58 @@ def _metric_universe() -> frozenset:
 
 
 # ---------------------------------------------------------------------------
+# Public read-only accessors over the cached ranges (single source of truth
+# reused by axiom.data_availability for prompt-facing data awareness).
+# ---------------------------------------------------------------------------
+
+def metric_universe() -> frozenset:
+    """Public: the set of enrichment metric names known across the ranges cache."""
+    return _metric_universe()
+
+
+def known_assets() -> frozenset:
+    """Public: the set of asset slugs (e.g. 'bitcoin') present in the cache."""
+    _ensure_loaded()
+    return _KNOWN_ASSETS or frozenset()
+
+
+def availability_index() -> dict:
+    """Public: nested view of the enrichment ranges cache.
+
+    Returns ``{asset_slug: {interval: {metric: {from, to, points}}}}`` built from
+    the cached ``/metrics/ranges`` lookup. Ensures the cache is loaded (and
+    refreshed-if-stale) first. Returns an empty dict when the cache is
+    unavailable. OHLCV/base columns are excluded (they never constrain).
+    """
+    _ensure_loaded()
+    index: dict = {}
+    for (asset, interval, metric), rng in (_LOOKUP or {}).items():
+        if metric in BASE_COLUMNS:
+            continue
+        index.setdefault(asset, {}).setdefault(interval, {})[metric] = {
+            "from": rng.get("from"),
+            "to": rng.get("to"),
+            "points": rng.get("points"),
+        }
+    return index
+
+
+def resolve_asset(symbol: Optional[str]) -> Optional[str]:
+    """Public wrapper over :func:`_resolve_asset` (pair/symbol -> asset slug)."""
+    return _resolve_asset(symbol)
+
+
+def tf_sort_key(timeframe: Optional[str]) -> int:
+    """Public: seconds for a timeframe, for ordering intervals coarsest-last."""
+    return _tf_seconds(timeframe)
+
+
+def compute_interval_mismatches(per_column: dict, strategy_tf: str) -> list[dict]:
+    """Public wrapper over :func:`_compute_interval_mismatches`."""
+    return _compute_interval_mismatches(per_column, strategy_tf)
+
+
+# ---------------------------------------------------------------------------
 # Resolution helpers
 # ---------------------------------------------------------------------------
 

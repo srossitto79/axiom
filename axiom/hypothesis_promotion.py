@@ -14,7 +14,7 @@ from axiom.research_contract import get_hypothesis_discipline_settings
 log = logging.getLogger(__name__)
 
 COOLDOWN_MINUTES = 15
-MAX_IN_FLIGHT_DEFAULT = 5
+MAX_IN_FLIGHT_DEFAULT = 5  # temporarily bumped for recovery push
 # Outcome buckets that count as positive for promise score. Child strategy verdict
 # is a JSON blob; we do a LIKE match on the serialized text to score quickly.
 POSITIVE_VERDICT_VALUES = ("deploy_eligible", "paper_eligible")

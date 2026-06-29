@@ -49,72 +49,6 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return default
 
 
-def _build_lan_columns_section(contract: ResearchContract) -> str:
-    """Return a context section listing LAN metrics actually available.
-
-    Queries /assets/{asset}/metrics for each mapped symbol found in the
-    contract's available_datasets. Best-effort: returns empty string on any
-    error so the caller can skip the section gracefully.
-    """
-    import logging
-    log = logging.getLogger(__name__)
-
-    try:
-        from axiom.lan_enricher import get_lan_enricher, _SYMBOL_MAP
-    except Exception:
-        return ""
-
-    # Collect symbols from the research contract's dataset list.
-    symbols: list[str] = []
-    datasets = getattr(contract, "available_datasets", None) or []
-    for ds in datasets:
-        sym = None
-        if isinstance(ds, dict):
-            sym = ds.get("symbol") or ds.get("pair") or ds.get("asset")
-        elif hasattr(ds, "symbol"):
-            sym = ds.symbol
-        elif hasattr(ds, "pair"):
-            sym = ds.pair
-        if sym and str(sym).upper() in _SYMBOL_MAP:
-            symbols.append(str(sym).upper())
-
-    # Fall back to BTC if no symbol can be determined.
-    if not symbols:
-        symbols = ["BTCUSDT"]
-
-    enricher = get_lan_enricher()
-    all_cols: list[str] = []
-    seen: set[str] = set()
-    for sym in symbols:
-        try:
-            cols = enricher.available_metrics(sym)
-            for c in cols:
-                if c not in seen:
-                    seen.add(c)
-                    all_cols.append(c)
-        except Exception as exc:
-            log.debug("LAN available_metrics skipped for %s: %s", sym, exc)
-
-    if not all_cols:
-        return ""
-
-    col_list = "\n".join(f"- `{c}`" for c in sorted(all_cols))
-    usage_hint = (
-        "\n\n**To use these columns:** call `create_custom_strategy` with a "
-        "BaseStrategy subclass. Guard each column with `if 'col' in df.columns:` "
-        "since enrichment availability varies by asset and date range. "
-        "Use versioned type names (liq_z_v1, liq_z_v2) when iterating on logic."
-    )
-    return (
-        "## LAN Metrics Available for This Backtest\n\n"
-        "The following columns will be present on the DataFrame at enrich time "
-        "(subject to Tier B date restrictions — see DATA SCHEMA). "
-        "Reference only columns from this list in your strategy code:\n\n"
-        + col_list
-        + usage_hint
-    )
-
-
 def render_constraint_memory(
     *,
     agent_id: str,
@@ -285,9 +219,9 @@ def build_research_context(
     # and injected unconditionally; the full DATA_SCHEMA.md is read on demand.
     sections.append(_format_compact_data_schema())
 
-    lan_columns_section = _build_lan_columns_section(contract)
-    if lan_columns_section:
-        sections.append(lan_columns_section)
+    # Live data-availability awareness (the full menu) is injected per-task by the
+    # runner (axiom.data_availability) so it can be filtered to the hypothesis
+    # focus when one exists. It is intentionally not duplicated here.
 
     sections += [
         render_constraint_memory(

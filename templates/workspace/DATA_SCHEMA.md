@@ -137,9 +137,10 @@ Depth buckets: 1% / 5% / 10% from mid-price.
 
 ## Dynamic Column Availability Note
 
-At strategy-generation time you will receive a **"## LAN Metrics Available for This Backtest"**
-section listing the exact columns confirmed present for the target asset and
-expected backtest window. Use that list — not this schema — to decide which
-Tier B columns to reference in your hypothesis code.
+At strategy-generation time you will receive a **"## DATA AVAILABILITY"** section
+(scoped to your target assets/timeframes when a hypothesis is in focus, or the
+full menu otherwise) listing the exact columns confirmed present and their date
+ranges. Use that section — not this schema — to decide which Tier B columns to
+reference in your hypothesis code.
 
 When no such section appears, assume only Tier A columns are available.

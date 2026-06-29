@@ -181,7 +181,9 @@ def run_crucible_discovery(*, settings: dict[str, Any] | None = None, force: boo
         "(YouTube/Reddit/forums/blogs/podcasts/github). Use the discover_* and inspect_* "
         "research tools to find materially novel, testable theses, then call create_hypothesis "
         "for each with explicit target assets/timeframes, mechanism, and the source's "
-        "claimed_edge captured as an artifact. Do not duplicate existing crucibles. "
+        "claimed_edge captured as an artifact. See the DATA AVAILABILITY section for the full "
+        "menu of metrics (funding, open interest, liquidations, L2 order book, on-chain/social) "
+        "you can ground ideas on. Do not duplicate existing crucibles. "
         f"{dedup_clause}"
         f"{review_clause}"
     )

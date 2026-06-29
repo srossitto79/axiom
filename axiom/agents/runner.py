@@ -937,7 +937,38 @@ def _format_hypothesis_context_for_prompt(input_data: dict | None) -> str:
         f"- Mechanism: {hypothesis.get('mechanism') or 'not specified'}",
         f"- Why Now: {hypothesis.get('why_now') or 'not specified'}",
     ]
+
+    # Filtered data-availability slice for the hypothesis's focus: exact columns
+    # and ranges the strategy author will actually receive in the dataframe.
+    try:
+        from axiom.data_availability import render_scoped_availability
+
+        scoped = render_scoped_availability(
+            hypothesis.get("target_assets"),
+            hypothesis.get("target_timeframes"),
+        )
+        if scoped:
+            lines += ["", "", scoped]
+    except Exception:
+        log.debug("scoped data-availability injection skipped", exc_info=True)
+
     return "\n".join(lines)
+
+
+def _format_full_data_availability_for_prompt() -> str:
+    """Unfiltered data-availability menu for tasks with no hypothesis focus.
+
+    Used for ideation / discovery / planning prompts so the agent reasons over the
+    full set of symbols, intervals, and enrichment metrics it could build on.
+    """
+    try:
+        from axiom.data_availability import render_full_availability
+
+        menu = render_full_availability()
+    except Exception:
+        log.debug("full data-availability injection skipped", exc_info=True)
+        return ""
+    return f"\n\n\n{menu}" if menu else ""
 
 
 def _assign_follow_through_task(**kwargs):
@@ -1295,7 +1326,13 @@ async def _run_agent_task_inner(
         prompt = f"# Task: {task.get('title', 'Untitled')}\n\n{task.get('description', '')}"
         if input_data:
             prompt += f"\n\n## Input Data\n```json\n{json.dumps(input_data, indent=2)[:3000]}\n```"
-        prompt += _format_hypothesis_context_for_prompt(input_data)
+        hypothesis_context = _format_hypothesis_context_for_prompt(input_data)
+        if hypothesis_context:
+            # Hypothesis-focused task → carries its own filtered availability slice.
+            prompt += hypothesis_context
+        else:
+            # No hypothesis focus (ideation/discovery/planning) → the full menu.
+            prompt += _format_full_data_availability_for_prompt()
 
         # Call AI with tool loop
         provider = agent.get("model", "openai")
