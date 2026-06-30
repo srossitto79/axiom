@@ -37,6 +37,15 @@ services:
       # - AXIOM_BOT_OWNS_RUNTIME=true # dont set it so the api will manage it without a separate container
       - AXIOM_ENABLE_REGIME_LAB=0
 
+      # ── Context budget (local-model support) ──────────────────
+      # Tool-call loop ceiling. Default in code is 12; override here if needed.
+      # - AXIOM_MAX_TOOL_ROUNDS=12
+      # Per-call INPUT-token budget. When set, the runner evicts the oldest
+      # tool-result history so each round's prompt fits the window. Leave unset
+      # (eviction off) for big-context cloud models. For a 64K local model set
+      # ~46000 (≈18K headroom for output); for 128K use ~100000.
+      # - AXIOM_CONTEXT_INPUT_BUDGET=46000
+
       # ── LAN metrics enricher ──────────────────────────────────
       - LAN_METRICS_URL=http://192.168.0.210:8001
 

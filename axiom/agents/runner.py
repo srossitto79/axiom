@@ -43,6 +43,7 @@ from .tool_definitions import (
     AGENT_TOOLS,
     BACKTESTING_TOOLS,  # noqa: F401 - legacy re-exported via axiom.agents
     BRAIN_TOOLS,  # noqa: F401 - legacy re-exported via axiom.agents
+    CONTEXT_INPUT_BUDGET_TOKENS,
     EXCHANGE_TOOLS,  # noqa: F401 - legacy re-exported via axiom.agents
     MAX_TOOL_ROUNDS,
     PIPELINE_AUTO_HANDOFF_TASK_TYPES,
@@ -93,6 +94,40 @@ def _is_missing_credentials_error(error: Exception) -> bool:
 # Backward-compatible re-exports used by axiom.agents.__init__ and older tests.
 _current_agent_id = _legacy_current_agent_id
 _recover_dangling_tasks = _legacy_recover_dangling_tasks
+
+
+_CONTEXT_BUDGET_FILE = "context_budget.jsonl"
+
+
+def _record_context_budget_measurement(
+    agent: dict, task: dict, provider: str, model_id: str, usage: dict,
+) -> None:
+    """Append one per-task context-budget sample to a JSONL file (Task 0).
+
+    Captures the PEAK single-round input (what a context window must actually
+    hold) alongside the accumulated sum, so a few hours of live traffic gives a
+    measured per-agent peak distribution instead of the misleading accumulated
+    totals. Best-effort — never affects task execution.
+    """
+    try:
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "agent_id": agent.get("id"),
+            "agent_name": agent.get("name"),
+            "role": agent.get("role"),
+            "task_id": task.get("id"),
+            "task_type": str(task.get("type") or "").strip().lower(),
+            "title": str(task.get("title") or "")[:120],
+            "provider": provider,
+            "model_id": model_id,
+            "rounds": int(usage.get("rounds") or 0),
+            "peak_input_tokens": int(usage.get("peak_input_tokens") or 0),
+            "accumulated_input_tokens": int(usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("output_tokens") or 0),
+        }
+        append_workspace(_CONTEXT_BUDGET_FILE, json.dumps(record) + "\n")
+    except Exception:
+        log.debug("context-budget measurement write skipped", exc_info=True)
 
 
 def _coerce_task_input_data(task: dict) -> dict:
@@ -364,6 +399,85 @@ async def _call_with_tools(
     raise last_error
 
 
+_EVICTION_STUB = (
+    "[older tool result evicted to fit the context budget — re-call the tool if "
+    "you still need this data]"
+)
+
+
+def _estimate_tokens(obj) -> int:
+    """Cheap token estimate (chars/4) for budgeting. No tokenizer dependency."""
+    try:
+        return len(json.dumps(obj, default=str)) // 4
+    except Exception:
+        return 0
+
+
+def _tool_result_slots(messages: list[dict]) -> list[dict]:
+    """Return the mutable dicts whose ``content`` holds a tool-result payload,
+    oldest first, across both provider message shapes:
+
+    - OpenAI/LM Studio style: a message with ``role == "tool"``.
+    - Anthropic/MiniMax style: ``tool_result`` blocks inside a user message's
+      ``content`` list.
+
+    The returned dicts are the live objects in *messages*, so mutating their
+    ``content`` shrinks the history in place without removing any message (which
+    would break tool-call/result id pairing and trigger provider 400s).
+    """
+    slots: list[dict] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "tool":
+            slots.append(msg)
+        elif msg.get("role") == "user" and isinstance(msg.get("content"), list):
+            for block in msg["content"]:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    slots.append(block)
+    return slots
+
+
+def _evict_tool_history(
+    messages: list[dict],
+    system: str,
+    tools: list[dict] | None,
+    budget_tokens: int,
+    keep_recent: int = 4,
+) -> int:
+    """Shrink the oldest tool-result payloads in place until the estimated prompt
+    (system + tool schemas + message history) fits *budget_tokens*.
+
+    Preserves the most recent *keep_recent* tool results (the model is usually
+    mid-reasoning over them) and never touches the original task prompt or
+    assistant turns. Returns the number of payloads evicted. No-op when budget
+    is disabled (≤0) or already satisfied.
+    """
+    if budget_tokens <= 0:
+        return 0
+    fixed = _estimate_tokens(system) + _estimate_tokens(list(tools or []))
+
+    def _over() -> bool:
+        return fixed + _estimate_tokens(messages) > budget_tokens
+
+    if not _over():
+        return 0
+
+    slots = _tool_result_slots(messages)
+    evictable = slots[:-keep_recent] if keep_recent > 0 else slots
+    evicted = 0
+    for slot in evictable:
+        content = slot.get("content")
+        # Only shrink string payloads we haven't already stubbed; leave structured
+        # (list) tool_result content alone to stay format-safe.
+        if isinstance(content, str) and len(content) > len(_EVICTION_STUB):
+            slot["content"] = _EVICTION_STUB
+            evicted += 1
+            if not _over():
+                break
+    return evicted
+
+
 async def _call_with_tools_single(
     provider: str, model_id: str, messages: list[dict], system: str,
     tools: list[dict] | None = None,
@@ -390,12 +504,26 @@ async def _call_with_tools_single(
     last_nonempty_text = ""
     _recent_tool_calls: list[tuple[str, str]] = []
     nudged_for_tool = False
-    total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    # NOTE: input_tokens here is the SUM across rounds (each round re-sends the
+    # growing history). peak_input_tokens is the MAX single-round input — the
+    # number a context window must actually hold, and the metric Task 0 of
+    # CONTEXT_REQUIREMENTS.md exists to capture. rounds = model calls made.
+    total_usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "peak_input_tokens": 0,
+        "rounds": 0,
+    }
 
     def _accum(usage: dict):
-        total_usage["input_tokens"] += int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        round_input = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        total_usage["input_tokens"] += round_input
         total_usage["output_tokens"] += int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
         total_usage["total_tokens"] = total_usage["input_tokens"] + total_usage["output_tokens"]
+        if round_input > total_usage["peak_input_tokens"]:
+            total_usage["peak_input_tokens"] = round_input
+        total_usage["rounds"] += 1
 
     for round_num in range(MAX_TOOL_ROUNDS):
         # Per-round cost cap: bound spend WITHIN a single task too, so one task
@@ -424,6 +552,20 @@ async def _call_with_tools_single(
 
         assert_callable(provider, model_id, slot=f"agent-tool-call:{provider}")
         token = get_token(provider)
+
+        # Bound the working set: when a context budget is configured, evict the
+        # oldest tool-result history so system + tools + messages stay under it.
+        # No-op when AXIOM_CONTEXT_INPUT_BUDGET is unset (cloud default).
+        if CONTEXT_INPUT_BUDGET_TOKENS > 0:
+            evicted = _evict_tool_history(
+                messages, system, active_tools, CONTEXT_INPUT_BUDGET_TOKENS
+            )
+            if evicted:
+                log.info(
+                    "Context budget (%dK): evicted %d old tool result(s) before round %d/%d",
+                    CONTEXT_INPUT_BUDGET_TOKENS // 1000, evicted, round_num + 1, MAX_TOOL_ROUNDS,
+                )
+
         response = await impl.call(model_id, messages, system, active_tools, token)
         _accum(response.usage)
 
@@ -1359,6 +1501,10 @@ async def _run_agent_task_inner(
             provider, model_id, messages, context, tools=agent_tools, agent_id=agent_id, trace=ai_trace
         )
         cost_usd = estimate_cost_usd(provider, model_id, usage)
+
+        # Task 0 (context budget): append the peak single-round input for this
+        # task so a few hours of live traffic yields a measured per-agent peak.
+        _record_context_budget_measurement(agent, task, provider, model_id, usage)
 
         # Prepend a ground-truth tool-execution ledger so operators can cross-
         # check the agent's narrative against what actually happened. The LLM

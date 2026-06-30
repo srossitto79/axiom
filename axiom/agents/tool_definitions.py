@@ -6,9 +6,35 @@ compatible list exports (``AGENT_TOOLS``, ``BRAIN_TOOLS``, etc.) by reading
 from the registry, plus constants that don't belong in the registry.
 """
 
+import os
+
 import axiom.agents.tools_research  # noqa: F401
 
-MAX_TOOL_ROUNDS = 25
+
+def _int_env(name: str, default: int) -> int:
+    """Positive-int env override, falling back to *default* when unset/invalid."""
+    try:
+        value = int((os.environ.get(name) or "").strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+# Tool-call loop ceiling. Lowered from the original 25 → 12: measured peak
+# context is dominated by accumulated tool-result history, and the long tail of
+# 13–25 round tasks is what pushed the per-round window toward overflow. 12 is
+# enough for legitimate multi-step tasks while bounding the worst case. Override
+# with AXIOM_MAX_TOOL_ROUNDS.
+MAX_TOOL_ROUNDS = _int_env("AXIOM_MAX_TOOL_ROUNDS", 12)
+
+# Per-call INPUT-token budget for the tool loop. When > 0, the runner evicts the
+# oldest tool-result payloads (replacing them with a stub, never dropping
+# messages) so that system + tool schemas + message history stay under this
+# ceiling on every round. 0 (default) disables eviction entirely, preserving the
+# original behavior on large-context cloud models. For a 64K local window set
+# AXIOM_CONTEXT_INPUT_BUDGET≈46000 (leaves ~18K for output + margin); for 128K
+# use ≈100000.
+CONTEXT_INPUT_BUDGET_TOKENS = _int_env("AXIOM_CONTEXT_INPUT_BUDGET", 0)
 
 # Only these task types are allowed to auto-advance strategy stages on completion.
 PIPELINE_AUTO_HANDOFF_TASK_TYPES = {
